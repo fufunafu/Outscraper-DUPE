@@ -13,5 +13,8 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "tsc --build",
     "scrape": "node --experimental-strip-types apps/cli/src/index.ts"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.61.1"
   }
 }

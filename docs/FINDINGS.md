@@ -65,30 +65,56 @@ Confirmed populated (fill rate across 20 Times Square restaurants):
 Note the request/response coordinate inversion: the pb sends `!2d<lng>!3d<lat>`,
 but the response is `[9][2]=lat, [9][3]=lng`. Swapping these is silent and ruinous.
 
-## Review count is absent from search responses
+## Review count: at [4][8], but only a headful browser is served it
 
-`[4]` has length 8 in **every** record — rating at `[4][7]` is the last element,
-so `[4][8]` (gosom's documented review-count index) cannot exist here. gosom
-reads `[4][8]` from *place-detail* responses, which have a longer `[4]`; the
-search-list `[4]` is truncated. Either Google trimmed it (they moved hours from
-`[34][1]` to `[203][0]` in Nov 2025, so this is in character) or it was never
-there for list responses.
+Review count lives at **`[4][8]`** — gosom's index was right all along. What
+varies is whether Google sends it:
 
-Ruled out, each by measurement rather than reasoning:
+| Client | payload | `[4]` len | `[4][8]` |
+| --- | --- | --- | --- |
+| `pb` HTTP endpoint | — | 8 | absent |
+| Headless Chrome | 264 KB | 15 | **null** |
+| Headful Chrome, logged out | **862 KB** | 15 | **26089** ✓ |
+| Real Chrome, logged in | 892 KB | 15 | 26089 ✓ |
 
-- **pb flag variants** — `!9b1`, `!24b1!25b1`, minimal tail, and a browser-like
-  `!12m16` block all returned `[4].length === 8`. Two variants returned zero
-  results, since an `m`-cluster's node count must be exact.
-- **`[75][0][0][4]` = 21631** looked like Carmine's review count. It is the same
-  constant for every place in the response, so it is not a per-place field. This
-  is the trap: a plausible number at a plausible path that is simply wrong.
-- **The SSR page** (`/maps/search/…`) is a 176KB shell with no results in it;
-  Google fetches them via XHR from this same endpoint after load.
+**Google serves a degraded payload to headless Chrome.** Same URL, same anonymous
+cookies, same everything — a real window gets 862KB with review counts, a
+headless one gets 264KB with them stripped. This is anti-bot behaviour, not a
+login gate: a logged-out headful browser gets the full data. So no Google account
+is needed, and scraping must never be run on the user's own session anyway —
+that would attach bulk activity to their personal account.
 
-So review count needs either the real frontend's `pb` (requires capturing live
-browser network traffic) or a per-place detail fetch — one extra request per
-place, versus one per twenty for search. `reviews_per_score` and `popular_times`
-are missing for the same reason.
+Verified against the DOM rather than by eyeballing plausibility, which mattered:
 
-Everything needed to *filter* leads — name, address, phone, site, category,
-rating, hours, coordinates — is already in the cheap path.
+| Place | DOM renders | `[4][8]` | `[37][1]` |
+| --- | --- | --- | --- |
+| Joe's Pizza Broadway | 26,089 | **26,089** | 22,853 |
+| Roma Pizza | 1,586 | **1,586** | 1,000 |
+| Madison Pizza NYC | 194 | **194** | 256 |
+| Angelo's Coal Oven | 3,677 | **3,677** | 2,373 |
+
+`[4][8]` matches 7/7. **`[37][1]` does not** — it is some other per-place integer
+that happens to look like a review count, and it was nearly shipped as one.
+
+Three separate decoys sat in this payload: `[75][0][0][4]` = 21631 (a constant,
+identical for every place), `[88][4][*]` (rendering metadata), and `[37][1]`
+(varies per place, wrong values). Every one is a plausible integer at a plausible
+path. **Only cross-checking against what Google actually renders distinguishes
+them** — so any new field mapping gets verified against the DOM before it ships.
+
+## Two extraction paths, by cost
+
+| | `pb` HTTP | headful browser |
+| --- | --- | --- |
+| Per request | ~200 ms | ~2 s |
+| Places per request | 20 | 20 |
+| Review count, reviews_per_score | no | **yes** |
+| Cost per 1k places | ~10 s | ~100 s |
+
+The browser path is ~10× slower but still amortises over 20 places per load —
+it is not the one-fetch-per-place tax it first appeared to be. Default to `pb`
+for coverage sweeps; use the browser when review counts matter for filtering.
+
+Headless is not a middle option: it costs browser latency and returns endpoint
+data. Either go fast over HTTP or go complete with a real window (`xvfb` on a
+server, or a stealth-patched runtime such as `patchright`).
