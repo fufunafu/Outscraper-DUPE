@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Places Scraper</title>
+<style>
+  :root {
+    --bg:#eef2fb; --card:#fff; --ink:#1a2233; --muted:#6b7688; --line:#dfe4ee;
+    --accent:#3b6fe0; --on-accent:#fff; --ok:#1a7f52; --warn:#a86b0a; --err:#c0392b;
+    --chip:#f3f6fc; --radius:10px; --shadow:0 8px 28px rgba(20,30,60,.14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#11151f; --card:#181d29; --ink:#e8ecf4; --muted:#8d97a9; --line:#2a3141;
+      --chip:#1f2532; --accent:#5b8bff; --ok:#4ec98b; --warn:#e0a94f; --err:#ff7a6b;
+      --shadow:0 8px 28px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:32px 20px 80px; background:var(--bg); color:var(--ink);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; }
+  .wrap { max-width:960px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px; margin-bottom:20px; }
+  h1 { font-size:22px; margin:0 0 4px; display:flex; align-items:center; gap:10px; }
+  h1 .dot { width:26px; height:26px; border-radius:7px; background:var(--accent); display:grid; place-items:center; color:#fff; font-size:14px; }
+  .sub { color:var(--muted); margin:0 0 24px; font-size:14px; }
+  label { display:block; font-weight:600; font-size:13px; margin-bottom:6px; }
+  .req { color:var(--err); }
+  .hint { color:var(--muted); font-size:12px; font-weight:400; margin-top:6px; }
+  input[type=text], input[type=number], select { width:100%; padding:10px 12px; font:inherit; color:var(--ink);
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius); }
+  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent); }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .field { margin-bottom:20px; }
+
+  /* Token box — the control that holds picked categories/locations */
+  .tokens { display:flex; flex-wrap:wrap; gap:6px; align-items:center; min-height:44px;
+    padding:6px 8px; border:1px solid var(--line); border-radius:var(--radius); background:var(--card); cursor:text; }
+  .tokens:focus-within { outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent); }
+  .tokens input { border:0 !important; outline:0 !important; padding:6px 4px !important; flex:1; min-width:120px; background:transparent; }
+  .token { display:inline-flex; align-items:center; gap:6px; background:var(--chip); border:1px solid var(--line);
+    border-radius:6px; padding:3px 6px 3px 9px; font-size:13px; white-space:nowrap; }
+  .token button { border:0; background:transparent; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:0 2px; }
+  .token button:hover { color:var(--err); }
+  .token.all { background:color-mix(in srgb,var(--accent) 14%,transparent); border-color:var(--accent); }
+
+  .pop { position:absolute; z-index:40; background:var(--card); border:1px solid var(--line);
+    border-radius:var(--radius); box-shadow:var(--shadow); max-height:340px; overflow:auto; min-width:280px; }
+  .pop[hidden] { display:none; }
+  .opt { padding:9px 12px; cursor:pointer; font-size:14px; display:flex; align-items:center; gap:9px; }
+  .opt:hover, .opt[aria-selected=true] { background:var(--chip); }
+  .opt .why { margin-left:auto; font-size:11px; color:var(--muted); }
+  .opt.head { font-weight:600; font-size:12px; color:var(--muted); cursor:default; text-transform:uppercase; letter-spacing:.04em; }
+  .opt.head:hover { background:transparent; }
+  .expand { border:0; background:transparent; color:var(--muted); cursor:pointer; width:18px; font-size:13px; padding:0; }
+  .kids { padding-left:26px; }
+  .popbar { display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--card); }
+  .popbar button { border:0; background:transparent; color:var(--accent); font:inherit; font-size:13px; cursor:pointer; padding:0; }
+  input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; }
+
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+  .chip { border:1px solid var(--line); background:var(--chip); color:var(--ink); padding:7px 12px;
+    border-radius:20px; font-size:13px; cursor:pointer; }
+  .chip[aria-pressed=true] { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+  details { border-top:1px solid var(--line); padding-top:16px; margin-top:8px; }
+  summary { cursor:pointer; font-weight:600; font-size:14px; margin-bottom:14px; }
+  button.primary { background:var(--accent); color:var(--on-accent); border:0; padding:12px 28px;
+    border-radius:var(--radius); font:inherit; font-weight:600; cursor:pointer; }
+  button.primary:disabled { opacity:.55; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); padding:7px 14px;
+    border-radius:8px; font:inherit; font-size:13px; cursor:pointer; }
+  .banner { padding:10px 14px; border-radius:var(--radius); font-size:13px; margin-bottom:16px; }
+  .banner.err { background:color-mix(in srgb,var(--err) 12%,transparent); color:var(--err); }
+  .banner.warn { background:color-mix(in srgb,var(--warn) 16%,transparent); color:var(--warn); }
+  .job { border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:12px; }
+  .job h3 { margin:0 0 2px; font-size:15px; }
+  .meta { color:var(--muted); font-size:12.5px; }
+  .bar { height:6px; background:var(--chip); border-radius:4px; overflow:hidden; margin:12px 0 8px; }
+  .bar > i { display:block; height:100%; background:var(--accent); transition:width .3s; }
+  .stats { display:flex; gap:18px; flex-wrap:wrap; font-size:13px; color:var(--muted); }
+  .stats b { color:var(--ink); font-variant-numeric:tabular-nums; }
+  .status { font-size:12px; font-weight:600; padding:2px 9px; border-radius:20px; background:var(--chip); color:var(--muted); }
+  .status.running,.status.starting { background:color-mix(in srgb,var(--accent) 15%,transparent); color:var(--accent); }
+  .status.done { background:color-mix(in srgb,var(--ok) 15%,transparent); color:var(--ok); }
+  .status.failed { background:color-mix(in srgb,var(--err) 15%,transparent); color:var(--err); }
+  .head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .actions { display:flex; gap:8px; margin-top:12px; }
+  .legs { margin-top:10px; font-size:12.5px; color:var(--muted); display:flex; flex-wrap:wrap; gap:5px; }
+  .leg { padding:2px 8px; border-radius:5px; background:var(--chip); }
+  .leg.running { background:color-mix(in srgb,var(--accent) 16%,transparent); color:var(--accent); }
+  .leg.done { background:color-mix(in srgb,var(--ok) 13%,transparent); color:var(--ok); }
+  .leg.failed { background:color-mix(in srgb,var(--err) 13%,transparent); color:var(--err); }
+  .tablewrap { overflow-x:auto; margin-top:14px; border:1px solid var(--line); border-radius:8px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { background:var(--chip); font-size:12px; }
+  .empty { color:var(--muted); font-size:14px; text-align:center; padding:28px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <form class="card" id="form">
+    <h1><span class="dot">◉</span> Places Scraper</h1>
+    <p class="sub">Pulls business listings from Google Maps. Everything runs on this machine.</p>
+    <div id="formError"></div>
+
+    <div class="field">
+      <label for="catInput">Categories <span class="req">*</span></label>
+      <div class="tokens" id="catBox"><input type="text" id="catInput" placeholder="Start typing — e.g. resturant" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="catPop"></div>
+      <div class="pop" id="catPop" role="listbox" hidden></div>
+      <p class="hint">Google's own business categories. Typos are fine. Pick several to sweep them all.</p>
+    </div>
+
+    <div class="field">
+      <label for="locInput">Locations <span class="req">*</span></label>
+      <div class="row" style="grid-template-columns:170px 1fr; gap:10px">
+        <select id="country"></select>
+        <div>
+          <div class="tokens" id="locBox"><input type="text" id="locInput" placeholder="Search a city, or pick regions" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="locPop"></div>
+        </div>
+      </div>
+      <div class="pop" id="locPop" role="listbox" hidden></div>
+      <p class="hint" id="locHint">Tick a province/state, or expand it with <b>+</b> to pick single cities.</p>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="limit">Maximum results</label>
+        <input type="number" id="limit" min="1" step="1" placeholder="Leave empty for all">
+        <p class="hint">Across every category and location.</p>
+      </div>
+      <div class="field">
+        <label for="language">Language</label>
+        <select id="language">
+          <option value="en" selected>English (en)</option>
+          <option value="fr">French (fr)</option>
+        </select>
+        <p class="hint">Affects day names and status text.</p>
+      </div>
+    </div>
+
+    <details>
+      <summary>Filters</summary>
+      <div class="chips" id="chips">
+        <button type="button" class="chip" data-f="onlyWithWebsite" aria-pressed="false">Only with website</button>
+        <button type="button" class="chip" data-f="onlyWithoutWebsite" aria-pressed="false">Only without website</button>
+        <button type="button" class="chip" data-f="operationalOnly" aria-pressed="false">Operational only</button>
+        <button type="button" class="chip" data-f="withPhone" aria-pressed="false">With phone</button>
+        <button type="button" class="chip" data-f="verified" aria-pressed="false">Verified</button>
+        <button type="button" class="chip" data-f="goodRating" aria-pressed="false">Good rating (4.0+)</button>
+        <button type="button" class="chip" data-f="badRating" aria-pressed="false">Bad rating (under 3.0)</button>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <div class="field" style="margin:0">
+          <label for="minReviews">Minimum reviews</label>
+          <input type="number" id="minReviews" min="0" step="1" placeholder="0">
+          <p class="hint">A 5.0 from two reviews isn't a good rating. Pair this with a rating filter.</p>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:14px">Filters trim the export, they don't speed up the scrape — Google has no filter parameter, so every row gets fetched either way.</p>
+    </details>
+
+    <div id="estimate"></div>
+    <div style="margin-top:22px"><button type="submit" class="primary" id="go">Get data</button></div>
+  </form>
+
+  <div class="card">
+    <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">↓</span> Runs</h1>
+    <div id="jobs"><p class="empty">No runs yet. Results are saved to <code>Documents/Places Scraper</code>.</p></div>
+  </div>
+</div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let COUNTRIES = {};
+const cats = new Set();
+const locs = new Map();   // key -> {country, region, city}
+const filters = new Set();
+
+const locKey = (l) => `${l.country}/${l.region}/${l.city ?? ''}`;
+const locLabel = (l) => l.city ? `${l.city}, ${l.region}` : l.region;
+
+/* ---------- categories ---------- */
+let catActive = -1, catOpts = [];
+// Every keystroke fires a request, and they don't come back in order — a slow
+// response for "rest" can land after a fast one for "resturant" and overwrite
+// the right answer with a stale one. Only render if nothing newer has been sent.
+let catSeq = 0;
+
+function renderCatTokens() {
+  const box = $('catBox');
+  [...box.querySelectorAll('.token')].forEach((t) => t.remove());
+  for (const c of cats) {
+    const el = document.createElement('span');
+    el.className = 'token';
+    el.innerHTML = `${esc(c)} <button type="button" aria-label="Remove ${esc(c)}">×</button>`;
+    el.querySelector('button').onclick = () => { cats.delete(c); renderCatTokens(); };
+    box.insertBefore(el, $('catInput'));
+  }
+}
+
+async function showCats(q) {
+  const pop = $('catPop');
+  if (!q.trim()) { pop.hidden = true; $('catInput').setAttribute('aria-expanded','false'); return; }
+  const seq = ++catSeq;
+  const res = await fetch('/api/categories?q=' + encodeURIComponent(q));
+  const opts = await res.json();
+  if (seq !== catSeq) return;
+  catOpts = opts.filter((c) => !cats.has(c));
+  if (!catOpts.length) {
+    pop.innerHTML = `<div class="opt head">No category matches — “${esc(q)}” will be used as free text</div>`;
+  } else {
+    pop.innerHTML = catOpts.map((c, i) =>
+      `<div class="opt" role="option" data-i="${i}" aria-selected="${i===0}">${esc(c)}</div>`).join('');
+  }
+  catActive = 0;
+  position(pop, $('catBox'));
+  pop.hidden = false;
+  $('catInput').setAttribute('aria-expanded','true');
+}
+
+function addCat(name) {
+  if (name.trim()) cats.add(name.trim());
+  $('catInput').value = '';
+  $('catPop').hidden = true;
+  renderCatTokens();
+  updateEstimate();
+}
+
+$('catBox').onclick = () => $('catInput').focus();
+$('catInput').oninput = (e) => showCats(e.target.value);
+$('catInput').onkeydown = (e) => {
+  const pop = $('catPop');
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (pop.hidden || !catOpts.length) return;
+    catActive = (catActive + (e.key === 'ArrowDown' ? 1 : -1) + catOpts.length) % catOpts.length;
+    [...pop.querySelectorAll('.opt')].forEach((o, i) => o.setAttribute('aria-selected', String(i === catActive)));
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    // Enter takes the highlighted suggestion; if none matched, take the raw text
+    // so free-text queries still work.
+    addCat(catOpts[catActive] ?? e.target.value);
+  } else if (e.key === 'Escape') { pop.hidden = true; }
+  else if (e.key === 'Backspace' && !e.target.value && cats.size) {
+    const last = [...cats].pop(); cats.delete(last); renderCatTokens();
+  }
+};
+$('catPop').onclick = (e) => { const o = e.target.closest('.opt[data-i]'); if (o) addCat(catOpts[+o.dataset.i]); };
+
+/* ---------- locations ---------- */
+const expanded = new Set();
+
+function renderLocTokens() {
+  const box = $('locBox');
+  [...box.querySelectorAll('.token')].forEach((t) => t.remove());
+  const cc = $('country').value;
+  const total = COUNTRIES[cc]?.regions.length ?? 0;
+  const wholeCountry = [...locs.values()].filter((l) => l.country === cc && !l.city).length;
+
+  // Collapse "every region ticked" into one token instead of 13 — this is what
+  // Outscraper's "All CA locations (13)" is doing, and it keeps the box usable.
+  if (total && wholeCountry === total && locs.size === total) {
+    const el = document.createElement('span');
+    el.className = 'token all';
+    el.innerHTML = `All ${esc(cc)} locations (${total}) <button type="button" aria-label="Clear">×</button>`;
+    el.querySelector('button').onclick = () => { locs.clear(); renderLocTokens(); updateEstimate(); };
+    box.insertBefore(el, $('locInput'));
+    return;
+  }
+  for (const [key, l] of locs) {
+    const el = document.createElement('span');
+    el.className = 'token';
+    el.innerHTML = `${esc(locLabel(l))} <button type="button" aria-label="Remove">×</button>`;
+    el.querySelector('button').onclick = () => { locs.delete(key); renderLocTokens(); renderLocPop(); updateEstimate(); };
+    box.insertBefore(el, $('locInput'));
+  }
+}
+
+function renderLocPop() {
+  const pop = $('locPop');
+  const cc = $('country').value;
+  const regions = COUNTRIES[cc]?.regions ?? [];
+  const allOn = regions.length > 0 && regions.every((r) => locs.has(locKey({country:cc, region:r.code})));
+
+  pop.innerHTML =
+    `<div class="popbar"><button type="button" id="toggleAll">${allOn ? 'Unselect all' : 'Select all'}</button>
+     <span class="meta">${regions.length} regions</span></div>` +
+    regions.map((r) => {
+      const key = locKey({country:cc, region:r.code});
+      const on = locs.has(key);
+      const open = expanded.has(r.code);
+      const kids = open ? `<div class="kids">${r.cities.slice(0, 40).map((c) => {
+        const ckey = locKey({country:cc, region:r.code, city:c.n});
+        return `<div class="opt" data-city="${esc(c.n)}" data-region="${r.code}">
+          <input type="checkbox" ${locs.has(ckey) ? 'checked' : ''} tabindex="-1">
+          <span>${esc(c.n)}</span><span class="why">${c.p.toLocaleString()}</span></div>`;
+      }).join('')}</div>` : '';
+      return `<div>
+        <div class="opt" data-region="${r.code}">
+          <button type="button" class="expand" data-x="${r.code}" aria-label="${open?'Collapse':'Expand'} ${esc(r.name)}">${open ? '−' : '+'}</button>
+          <input type="checkbox" ${on ? 'checked' : ''} tabindex="-1">
+          <span><b>${r.code}</b> <span class="meta">${esc(r.name)}</span></span>
+        </div>${kids}</div>`;
+    }).join('');
+  position(pop, $('locBox'));
+}
+
+$('locPop').onclick = (e) => {
+  const cc = $('country').value;
+  const x = e.target.closest('.expand');
+  if (x) {
+    expanded.has(x.dataset.x) ? expanded.delete(x.dataset.x) : expanded.add(x.dataset.x);
+    renderLocPop(); return;
+  }
+  if (e.target.id === 'toggleAll') {
+    const regions = COUNTRIES[cc].regions;
+    const allOn = regions.every((r) => locs.has(locKey({country:cc, region:r.code})));
+    if (allOn) locs.clear();
+    else for (const r of regions) locs.set(locKey({country:cc, region:r.code}), {country:cc, region:r.code});
+    renderLocTokens(); renderLocPop(); updateEstimate(); return;
+  }
+  const opt = e.target.closest('.opt');
+  if (!opt || !opt.dataset.region) return;
+  const sel = opt.dataset.city
+    ? {country:cc, region:opt.dataset.region, city:opt.dataset.city}
+    : {country:cc, region:opt.dataset.region};
+  const key = locKey(sel);
+  if (locs.has(key)) locs.delete(key);
+  else {
+    locs.set(key, sel);
+    // Picking a whole region makes its individual cities redundant; leaving both
+    // would scrape the same ground twice and double the bill.
+    if (!sel.city) for (const [k, l] of locs) if (l.region === sel.region && l.city) locs.delete(k);
+  }
+  renderLocTokens(); renderLocPop(); updateEstimate();
+};
+
+$('locBox').onclick = () => { $('locInput').focus(); $('locPop').hidden = false; renderLocPop(); };
+$('locInput').onfocus = () => { $('locPop').hidden = false; renderLocPop(); };
+let locSeq = 0;
+$('locInput').oninput = async (e) => {
+  const q = e.target.value.trim();
+  if (!q) { renderLocPop(); return; }
+  const cc = $('country').value;
+  const seq = ++locSeq;
+  const res = await fetch(`/api/cities?country=${cc}&q=${encodeURIComponent(q)}`);
+  const hits = await res.json();
+  if (seq !== locSeq) return;
+  const pop = $('locPop');
+  pop.innerHTML = hits.length
+    ? `<div class="opt head">Cities</div>` + hits.map((h) =>
+        `<div class="opt" data-region="${h.region}" data-city="${esc(h.city)}">
+          <input type="checkbox" ${locs.has(locKey(h)) ? 'checked':''} tabindex="-1">
+          <span>${esc(h.city)}</span><span class="why">${h.region}</span></div>`).join('')
+    : `<div class="opt head">No city matches “${esc(q)}”</div>`;
+  position(pop, $('locBox'));
+  pop.hidden = false;
+};
+
+function position(pop, anchor) {
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = `${r.left + scrollX}px`;
+  pop.style.top = `${r.bottom + scrollY + 4}px`;
+  pop.style.width = `${Math.max(r.width, 280)}px`;
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#catBox,#catPop')) $('catPop').hidden = true;
+  if (!e.target.closest('#locBox,#locPop')) $('locPop').hidden = true;
+});
+
+/* ---------- estimate ---------- */
+let estTimer;
+function updateEstimate() {
+  clearTimeout(estTimer);
+  estTimer = setTimeout(async () => {
+    const el = $('estimate');
+    if (!cats.size || !locs.size) { el.innerHTML = ''; return; }
+    const legs = cats.size * locs.size;
+    const wholeRegions = [...locs.values()].filter((l) => !l.city).length;
+    // Warn on scale before someone commits, not after two hours.
+    if (wholeRegions >= 3 || legs >= 10) {
+      el.innerHTML = `<div class="banner warn"><b>${legs} sweep${legs>1?'s':''}</b> queued (${cats.size} × ${locs.size}).
+        Whole provinces/states take hours each and produce heavy duplication. Consider cities, or set a maximum.</div>`;
+    } else {
+      el.innerHTML = `<p class="hint">${legs} sweep${legs>1?'s':''}: ${cats.size} categor${cats.size>1?'ies':'y'} × ${locs.size} location${locs.size>1?'s':''}.</p>`;
+    }
+  }, 200);
+}
+
+/* ---------- filters ---------- */
+$('chips').onclick = (e) => {
+  const chip = e.target.closest('.chip'); if (!chip) return;
+  const key = chip.dataset.f, on = chip.getAttribute('aria-pressed') === 'true';
+  chip.setAttribute('aria-pressed', String(!on));
+  on ? filters.delete(key) : filters.add(key);
+  const opp = {onlyWithWebsite:'onlyWithoutWebsite', onlyWithoutWebsite:'onlyWithWebsite', goodRating:'badRating', badRating:'goodRating'}[key];
+  if (!on && opp && filters.has(opp)) {
+    filters.delete(opp);
+    document.querySelector(`.chip[data-f="${opp}"]`).setAttribute('aria-pressed','false');
+  }
+};
+
+function buildFilters() {
+  const f = {};
+  for (const k of filters) {
+    if (k === 'goodRating') f.minRating = 4.0;
+    else if (k === 'badRating') f.maxRating = 3.0;
+    else f[k] = true;
+  }
+  const mr = Number($('minReviews').value);
+  if (mr > 0) f.minReviews = mr;
+  return f;
+}
+
+/* ---------- submit ---------- */
+$('form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('formError').innerHTML = '';
+  // Take whatever is half-typed rather than silently dropping it.
+  if ($('catInput').value.trim()) addCat($('catInput').value);
+  $('go').disabled = true;
+  try {
+    const body = { queries: [...cats], locations: [...locs.values()], language: $('language').value, filters: buildFilters() };
+    const limit = Number($('limit').value);
+    if (limit > 0) body.limit = limit;
+    const res = await fetch('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Could not start the run.');
+    jobs.set(data.id, data); render();
+  } catch (err) {
+    $('formError').innerHTML = `<div class="banner err">${esc(err.message)}</div>`;
+  } finally { $('go').disabled = false; }
+};
+
+/* ---------- runs ---------- */
+const jobs = new Map();
+const fmt = (ms) => { const s = Math.round(ms/1000); if (s<60) return `${s}s`; const m = Math.floor(s/60);
+  return m<60 ? `${m}m ${s%60}s` : `${Math.floor(m/60)}h ${m%60}m`; };
+
+function render() {
+  const all = [...jobs.values()].sort((a,b) => b.startedAt - a.startedAt);
+  if (!all.length) return;
+  $('jobs').innerHTML = all.map((j) => {
+    const running = j.status === 'running' || j.status === 'starting';
+    const p = j.progress;
+    const pct = p.legsTotal ? Math.round((p.legsDone / p.legsTotal) * 100) : 0;
+    const title = `${j.request.queries.join(', ')} — ${j.request.locations.length} location${j.request.locations.length>1?'s':''}`;
+    return `<div class="job">
+      <div class="head">
+        <div><h3>${esc(title)}</h3><div class="meta">${p.legsDone}/${p.legsTotal} sweeps done</div></div>
+        <span class="status ${j.status}">${j.status}</span>
+      </div>
+      ${running ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+      ${j.error ? `<div class="banner err" style="margin:12px 0 0">${esc(j.error)}</div>` : ''}
+      <div class="stats" style="margin-top:10px">
+        <span><b>${p.found.toLocaleString()}</b> found</span>
+        <span><b>${p.cellsSearched.toLocaleString()}</b> areas searched</span>
+        ${p.cellsPending ? `<span><b>${p.cellsPending.toLocaleString()}</b> queued</span>` : ''}
+        <span><b>${p.duplicates.toLocaleString()}</b> duplicates merged</span>
+        <span>${fmt((j.finishedAt ?? Date.now()) - j.startedAt)}</span>
+        ${j.filtered ? `<span><b>${j.filtered.toLocaleString()}</b> removed by filters</span>` : ''}
+      </div>
+      ${j.legs.length > 1 ? `<div class="legs">${j.legs.map((l) =>
+        `<span class="leg ${l.status}" title="${esc(l.error ?? '')}">${esc(l.label)}${l.status==='done'?` · ${l.found}`:''}</span>`).join('')}</div>` : ''}
+      <div class="actions">
+        ${running ? `<button class="ghost" data-cancel="${j.id}">Stop</button>` : ''}
+        ${j.csvPath && j.total ? `<button class="ghost" data-reveal="${esc(j.csvPath)}">Show file</button>
+          <button class="ghost" data-preview="${j.id}">Preview</button>` : ''}
+      </div>
+      ${j.status==='done' && !j.total ? `<div class="banner warn" style="margin-top:12px">No results. ${j.filtered ? 'Your filters removed every row.' : 'Try a broader category or area.'}</div>` : ''}
+      <div id="prev-${j.id}"></div>
+    </div>`;
+  }).join('');
+}
+
+$('jobs').onclick = async (e) => {
+  const c = e.target.closest('[data-cancel]');
+  if (c) return void fetch(`/api/jobs/${c.dataset.cancel}/cancel`, {method:'POST'});
+  const r = e.target.closest('[data-reveal]');
+  if (r) return void fetch('/api/reveal', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:r.dataset.reveal})});
+  const p = e.target.closest('[data-preview]');
+  if (!p) return;
+  const host = $(`prev-${p.dataset.preview}`);
+  if (host.innerHTML) { host.innerHTML = ''; return; }
+  const { places, total } = await (await fetch(`/api/jobs/${p.dataset.preview}/preview`)).json();
+  const cols = ['name','rating','reviews','phone','site','full_address','category'];
+  host.innerHTML = `<div class="tablewrap"><table>
+    <thead><tr>${cols.map((c)=>`<th>${c}</th>`).join('')}</tr></thead>
+    <tbody>${places.map((pl)=>`<tr>${cols.map((c)=>`<td>${pl[c]==null?'':esc(String(pl[c])).slice(0,60)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div><p class="hint">Showing ${places.length} of ${total.toLocaleString()}. The file has all 54 columns.</p>`;
+};
+
+/* ---------- boot ---------- */
+COUNTRIES = await (await fetch('/api/countries')).json();
+$('country').innerHTML = Object.entries(COUNTRIES).map(([cc, c]) =>
+  `<option value="${cc}">${c.flag} ${esc(c.name)}</option>`).join('');
+$('country').onchange = () => { locs.clear(); expanded.clear(); renderLocTokens(); renderLocPop(); updateEstimate(); };
+
+const events = new EventSource('/api/events');
+events.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.type === 'hello') { for (const j of m.jobs) jobs.set(j.id, j); render(); }
+  else if (m.type === 'job') { jobs.set(m.job.id, m.job); render(); }
+};
+setInterval(() => { if ([...jobs.values()].some((j)=>j.status==='running'||j.status==='starting')) render(); }, 1000);
+</script>
+</body>
+</html>

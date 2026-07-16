@@ -24,6 +24,26 @@ describe('toCsv', () => {
     assert.match(csv, /\t=HYPERLINK/, 'should be tab-prefixed and quoted');
   });
 
+  it('leaves phone numbers and negative numbers intact', () => {
+    // The guard used to fire on any leading +/-, which tab-prefixed every
+    // international phone number in the export and corrupted the column.
+    const place = emptyPlace('restaurants');
+    place.name = 'Test';
+    place.phone = '+1 718-576-3558';
+    place.longitude = -73.9855;
+    const csv = toCsv([place], { columns: ['name', 'phone', 'longitude'] });
+    const row = csv.trimEnd().split('\r\n')[1];
+    assert.equal(row, 'Test,+1 718-576-3558,-73.9855');
+    assert.ok(!row!.includes('\t'), 'phone must not be tab-prefixed');
+  });
+
+  it('still escapes formulas that begin with + or -', () => {
+    const csv = toCsv([placeNamed("+cmd|'/C calc'!A0")]);
+    assert.match(csv, /\t\+cmd/, 'a +formula is still neutralised');
+    const minus = toCsv([placeNamed('-HYPERLINK("http://evil.test")')]);
+    assert.match(minus, /\t-HYPERLINK/);
+  });
+
   it('serialises nested values as JSON rather than [object Object]', () => {
     const place = emptyPlace('restaurants');
     place.working_hours = { Monday: '9AM-5PM' };

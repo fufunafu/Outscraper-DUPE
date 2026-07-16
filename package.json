@@ -10,13 +10,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "tsc --build",
-    "scrape": "node --experimental-strip-types apps/cli/src/index.ts"
+    "start": "node --experimental-strip-types --no-warnings apps/desktop/src/main.ts",
+    "test": "node --experimental-strip-types --test packages/engine/src/**/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
-    "playwright-core": "^1.61.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {

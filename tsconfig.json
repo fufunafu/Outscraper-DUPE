@@ -15,5 +15,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["packages/*/src/**/*.ts", "apps/cli/src/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts", "apps/desktop/src/**/*.ts"]
 }

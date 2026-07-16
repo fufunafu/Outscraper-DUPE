@@ -9,17 +9,32 @@
 import { PLACE_COLUMNS, type EnrichedPlace, type Place } from '../schema.ts';
 
 /**
+ * Does this cell risk being executed as a formula by Excel or Sheets?
+ *
+ * `=` and `@` always start one. `+` and `-` do too, but they also start every
+ * international phone number and every negative coordinate — and blanket-
+ * escaping those corrupts real data far more often than it prevents an attack.
+ * So `+`/`-` only count when followed by something that could actually form a
+ * formula: a letter, or a reference/pipe character. `+1 718-555-0100` is data;
+ * `+cmd|'/C calc'!A0` is not.
+ */
+function risksFormulaExecution(value: string): boolean {
+  if (/^[=@]/.test(value)) return true;
+  if (/^[+\-][A-Za-z(|]/.test(value)) return true;
+  // A leading tab or CR can shift the cell and smuggle the next one into a formula.
+  return /^[\t\r]/.test(value);
+}
+
+/**
  * RFC 4180 quoting. Fields containing a comma, quote, or newline get wrapped,
  * and embedded quotes are doubled.
  *
- * The leading-character check guards against CSV injection: a cell starting
- * with =, +, -, or @ is executed as a formula when the file is opened in Excel
- * or Sheets, and business names are attacker-controlled text. Prefixing with a
- * tab neutralises it while still displaying the original string.
+ * Cells that would execute as formulas are prefixed with a tab, which stops the
+ * evaluation while leaving the text readable. Business names are attacker-
+ * controlled, so this is a real vector rather than a hypothetical one.
  */
 function escapeCell(value: string): string {
-  const dangerous = /^[=+\-@\t\r]/.test(value);
-  const body = dangerous ? `\t${value}` : value;
+  const body = risksFormulaExecution(value) ? `\t${value}` : value;
   if (/[",\n\r]/.test(body)) {
     return `"${body.replace(/"/g, '""')}"`;
   }
