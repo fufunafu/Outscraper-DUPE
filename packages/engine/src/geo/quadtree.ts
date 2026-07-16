@@ -22,11 +22,6 @@ export interface Cell {
 
 export interface CoverageOptions {
   /**
-   * Result count at or above which a cell is assumed truncated. Should be set
-   * to the observed cap of the search backend, not above it.
-   */
-  saturationThreshold: number;
-  /**
    * Stop subdividing once a cell's diagonal falls below this. Past a certain
    * size, splitting costs more searches than it surfaces new places.
    */
@@ -36,15 +31,20 @@ export interface CoverageOptions {
 }
 
 export const DEFAULT_COVERAGE: CoverageOptions = {
-  saturationThreshold: 100,
-  minCellMetres: 400,
-  maxDepth: 8,
+  minCellMetres: 250,
+  maxDepth: 10,
 };
 
 /** What a search of one cell produced, as far as coverage is concerned. */
 export interface CellOutcome {
   /** Number of places the search returned for this cell. */
   count: number;
+  /**
+   * Whether Google appears to have truncated this cell's list. Decided by the
+   * searcher (see geo/saturation.ts), which can see where the places actually
+   * are; a count alone cannot tell truncation from sparseness.
+   */
+  saturated: boolean;
 }
 
 export type CellSearcher = (cell: Cell) => Promise<CellOutcome>;
@@ -72,7 +72,7 @@ export interface CoverageResult {
 }
 
 function shouldSubdivide(cell: Cell, outcome: CellOutcome, opts: CoverageOptions): boolean {
-  if (outcome.count < opts.saturationThreshold) return false;
+  if (!outcome.saturated) return false;
   if (cell.depth >= opts.maxDepth) return false;
   if (diagonalMetres(cell.box) <= opts.minCellMetres) return false;
   return true;
@@ -115,7 +115,7 @@ export async function coverRegion(
       failed += 1;
       onProgress?.({
         cell,
-        outcome: { count: 0 },
+        outcome: { count: 0, saturated: false },
         subdivided: false,
         searched,
         pending: queue.length,
@@ -131,7 +131,7 @@ export async function coverRegion(
       for (const child of subdivide(cell.box)) {
         queue.push({ box: child, depth: cell.depth + 1, zoom: zoomForBox(child) });
       }
-    } else if (outcome.count >= opts.saturationThreshold) {
+    } else if (outcome.saturated) {
       // Bottomed out while still saturated: this cell is denser than we can
       // resolve, so some places here were never seen.
       truncated += 1;

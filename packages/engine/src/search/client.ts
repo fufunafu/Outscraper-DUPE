@@ -7,6 +7,8 @@
  * so it is the default path; the browser is reserved for detail-only fields.
  */
 
+import type { Dispatcher } from 'undici';
+
 export class RateLimited extends Error {
   constructor(message: string) {
     super(message);
@@ -24,8 +26,11 @@ export class BlockedByCaptcha extends Error {
 export interface FetchOptions {
   hl?: string;
   signal?: AbortSignal;
-  /** Proxy dispatcher (e.g. an undici ProxyAgent) for rotating egress IPs. */
-  dispatcher?: unknown;
+  /**
+   * Egress route for this request. Omitting it sends from the operator's own
+   * IP, which is fine for a handful of requests and unwise for a real run.
+   */
+  dispatcher?: Dispatcher;
   timeoutMs?: number;
 }
 
@@ -71,8 +76,9 @@ export async function fetchSearchPage(url: string, options: FetchOptions = {}): 
   const response = await fetch(url, {
     headers: headersFor(hl),
     signal: combined,
+    // `dispatcher` is an undici extension to RequestInit, not part of the DOM type.
     ...(dispatcher ? { dispatcher } : {}),
-  } as RequestInit);
+  } as RequestInit & { dispatcher?: Dispatcher });
 
   if (response.status === 429 || response.status === 503) {
     throw new RateLimited(`upstream returned ${response.status}`);

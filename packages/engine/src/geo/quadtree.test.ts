@@ -13,7 +13,7 @@ describe('coverRegion', () => {
     const searched: number[] = [];
     const result = await coverRegion(MANHATTAN, async (cell) => {
       searched.push(cell.depth);
-      return { count: 12 };
+      return { count: 12, saturated: false };
     });
 
     assert.equal(result.cellsSearched, 1);
@@ -26,8 +26,8 @@ describe('coverRegion', () => {
     // Saturated at depth 0 only; children come back sparse.
     const result = await coverRegion(
       MANHATTAN,
-      async (cell) => ({ count: cell.depth === 0 ? 100 : 5 }),
-      { saturationThreshold: 100 },
+      async (cell) => ({ count: cell.depth === 0 ? 100 : 5, saturated: cell.depth === 0 }),
+      {},
     );
 
     assert.equal(result.cellsSearched, 5, 'root plus four children');
@@ -39,8 +39,8 @@ describe('coverRegion', () => {
     // Everything is saturated, so only maxDepth can halt the recursion.
     const result = await coverRegion(
       MANHATTAN,
-      async () => ({ count: 500 }),
-      { saturationThreshold: 100, maxDepth: 2, minCellMetres: 0 },
+      async () => ({ count: 500, saturated: true }),
+      { maxDepth: 2, minCellMetres: 0 },
     );
 
     // Depth 0: 1 cell, depth 1: 4, depth 2: 16 — the 16 leaves stay saturated.
@@ -52,8 +52,8 @@ describe('coverRegion', () => {
   it('stops subdividing once cells fall below minCellMetres', async () => {
     const result = await coverRegion(
       MANHATTAN,
-      async () => ({ count: 500 }),
-      { saturationThreshold: 100, maxDepth: 20, minCellMetres: 5_000 },
+      async () => ({ count: 500, saturated: true }),
+      { maxDepth: 20, minCellMetres: 5_000 },
     );
 
     // Bounded by cell size rather than depth, so it must stop well short of depth 20.
@@ -67,9 +67,9 @@ describe('coverRegion', () => {
       MANHATTAN,
       async (cell) => {
         if (cell.depth > 0) boxes.push(cell.box);
-        return { count: cell.depth === 0 ? 100 : 1 };
+        return { count: cell.depth === 0 ? 100 : 1, saturated: cell.depth === 0 };
       },
-      { saturationThreshold: 100 },
+      {},
     );
 
     assert.equal(boxes.length, 4);
@@ -89,9 +89,9 @@ describe('coverRegion', () => {
       MANHATTAN,
       async (cell) => {
         if (cell.depth === 1) throw new Error('429 from upstream');
-        return { count: 100 };
+        return { count: 100, saturated: true };
       },
-      { saturationThreshold: 100, maxDepth: 3 },
+      { maxDepth: 3 },
     );
 
     assert.equal(result.cellsFailed, 4, 'all four children failed');

@@ -149,9 +149,9 @@ export const PLACE_COLUMNS: (keyof Place)[] = [
 ];
 
 export function emptyPlace(query: string): Place {
-  const place = { query } as Place;
+  const place: Record<string, unknown> = { query };
   for (const column of PLACE_COLUMNS) {
-    if (column !== 'query') (place as Record<string, unknown>)[column] = null;
+    if (column !== 'query') place[column] = null;
   }
-  return place;
+  return place as unknown as Place;
 }
