@@ -118,6 +118,8 @@ export function parsePlace(node: unknown, query: string): Place | null {
   place.subtypes = categoryNames.length > 1 ? categoryNames.slice(1).join(', ') : null;
 
   place.rating = pickNumber(node, 4, 7);
+  // Only present when the request carried a warm session cookie; a cookieless
+  // response truncates [4] at length 8, so this reads as null rather than wrong.
   place.reviews = pickNumber(node, 4, 8);
   place.reviews_link = pickString(node, 4, 3, 0);
   place.range = pickString(node, 4, 2);
@@ -155,6 +157,31 @@ export interface ParsedSearchPage {
   places: Place[];
   /** Nodes that looked like places but failed to parse; a spike means a layout change. */
   skipped: number;
+  /**
+   * True when Google served the reduced payload — real places, but with fields
+   * silently stripped. See `isDegraded`.
+   */
+  degraded: boolean;
+}
+
+/**
+ * Detect the reduced payload.
+ *
+ * Google answers some requests with a trimmed record even on a warm session:
+ * the ratings block `[4]` stops at length 8, so the review count at `[4][8]`
+ * cannot exist. It is not an error and not a block — the response looks
+ * perfectly valid and simply contains less.
+ *
+ * Checked structurally, on the length of `[4]`, rather than by asking whether
+ * any place has a review count: a genuinely review-free area would look
+ * identical to a degraded response under that test, and would then be retried
+ * forever.
+ */
+function isDegraded(nodes: unknown[]): boolean {
+  const rated = nodes.filter((node) => pickNumber(node, 4, 7) !== null);
+  if (rated.length === 0) return false;
+  // Full payloads carry a [4] longer than 8; trimmed ones stop at exactly 8.
+  return rated.every((node) => (pickArray(node, 4)?.length ?? 0) <= 8);
 }
 
 export function parseSearchPage(payload: unknown, query: string): ParsedSearchPage {
@@ -168,5 +195,5 @@ export function parseSearchPage(payload: unknown, query: string): ParsedSearchPa
     else skipped += 1;
   }
 
-  return { places, skipped };
+  return { places, skipped, degraded: isDegraded(nodes) };
 }

@@ -9,6 +9,8 @@
 
 import type { Dispatcher } from 'undici';
 
+import { GoogleSession } from './session.ts';
+
 export class RateLimited extends Error {
   constructor(message: string) {
     super(message);
@@ -32,23 +34,24 @@ export interface FetchOptions {
    */
   dispatcher?: Dispatcher;
   timeoutMs?: number;
+  /**
+   * Warmed cookie jar. Without one Google silently strips fields (review counts
+   * among them) rather than erroring — see session.ts.
+   */
+  session?: GoogleSession;
 }
 
-/**
- * Requesting from an EU-geolocated IP redirects to a consent interstitial.
- * Presetting the consent cookie sidesteps it without a browser round-trip.
- */
-const CONSENT_COOKIE = 'CONSENT=YES+cb.20260101-00-p0.en; SOCS=CAI';
+export const USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function headersFor(hl: string): Record<string, string> {
+function headersFor(hl: string, cookie: string): Record<string, string> {
   return {
     // Accept-Language must agree with hl — a mismatch is a fingerprinting signal.
     'Accept-Language': `${hl},${hl.split('-')[0]};q=0.9`,
-    'User-Agent':
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'User-Agent': USER_AGENT,
     Accept: '*/*',
     Referer: 'https://www.google.com/maps/',
-    Cookie: CONSENT_COOKIE,
+    Cookie: cookie,
   };
 }
 
@@ -68,13 +71,14 @@ export function stripXssiPrefix(body: string): string {
 }
 
 export async function fetchSearchPage(url: string, options: FetchOptions = {}): Promise<unknown> {
-  const { hl = 'en', signal, dispatcher, timeoutMs = 20_000 } = options;
+  const { hl = 'en', signal, dispatcher, timeoutMs = 20_000, session } = options;
 
   const timeout = AbortSignal.timeout(timeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
+  const cookie = session ? await session.cookie() : '';
   const response = await fetch(url, {
-    headers: headersFor(hl),
+    headers: headersFor(hl, cookie),
     signal: combined,
     // `dispatcher` is an undici extension to RequestInit, not part of the DOM type.
     ...(dispatcher ? { dispatcher } : {}),

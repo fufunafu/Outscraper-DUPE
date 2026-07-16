@@ -65,56 +65,99 @@ Confirmed populated (fill rate across 20 Times Square restaurants):
 Note the request/response coordinate inversion: the pb sends `!2d<lng>!3d<lat>`,
 but the response is `[9][2]=lat, [9][3]=lng`. Swapping these is silent and ruinous.
 
-## Review count: at [4][8], but only a headful browser is served it
+## Review count: at [4][8], and gated on a session cookie
 
-Review count lives at **`[4][8]`** — gosom's index was right all along. What
-varies is whether Google sends it:
+**A correction.** This section previously concluded that Google serves a degraded
+payload to *headless* Chrome, on the strength of a headful-vs-headless comparison
+where headful got review counts and headless didn't. That was wrong. The real
+lever is the **`NID` session cookie** — the browsers differed in cookie warmth,
+not in headlessness, and the conclusion was drawn from the confounded variable.
 
-| Client | payload | `[4]` len | `[4][8]` |
-| --- | --- | --- | --- |
-| `pb` HTTP endpoint | — | 8 | absent |
-| Headless Chrome | 264 KB | 15 | **null** |
-| Headful Chrome, logged out | **862 KB** | 15 | **26089** ✓ |
-| Real Chrome, logged in | 892 KB | 15 | 26089 ✓ |
+Measured on the `pb` endpoint, holding everything else constant:
 
-**Google serves a degraded payload to headless Chrome.** Same URL, same anonymous
-cookies, same everything — a real window gets 862KB with review counts, a
-headless one gets 264KB with them stripped. This is anti-bot behaviour, not a
-login gate: a logged-out headful browser gets the full data. So no Google account
-is needed, and scraping must never be run on the user's own session anyway —
-that would attach bulk activity to their personal account.
-
-Verified against the DOM rather than by eyeballing plausibility, which mattered:
-
-| Place | DOM renders | `[4][8]` | `[37][1]` |
-| --- | --- | --- | --- |
-| Joe's Pizza Broadway | 26,089 | **26,089** | 22,853 |
-| Roma Pizza | 1,586 | **1,586** | 1,000 |
-| Madison Pizza NYC | 194 | **194** | 256 |
-| Angelo's Coal Oven | 3,677 | **3,677** | 2,373 |
-
-`[4][8]` matches 7/7. **`[37][1]` does not** — it is some other per-place integer
-that happens to look like a review count, and it was nearly shipped as one.
-
-Three separate decoys sat in this payload: `[75][0][0][4]` = 21631 (a constant,
-identical for every place), `[88][4][*]` (rendering metadata), and `[37][1]`
-(varies per place, wrong values). Every one is a plausible integer at a plausible
-path. **Only cross-checking against what Google actually renders distinguishes
-them** — so any new field mapping gets verified against the DOM before it ships.
-
-## Two extraction paths, by cost
-
-| | `pb` HTTP | headful browser |
+| Cookies sent | `[4]` length | places with review count |
 | --- | --- | --- |
-| Per request | ~200 ms | ~2 s |
-| Places per request | 20 | 20 |
-| Review count, reviews_per_score | no | **yes** |
-| Cost per 1k places | ~10 s | ~100 s |
+| none | 8 | 0/20 |
+| `CONSENT` + `SOCS` only | 8 | 0/20 |
+| **warmed `NID`** | **9** | **20/20** |
 
-The browser path is ~10× slower but still amortises over 20 places per load —
-it is not the one-fetch-per-place tax it first appeared to be. Default to `pb`
-for coverage sweeps; use the browser when review counts matter for filtering.
+`NID` is the anonymous cookie Google issues to any first-time visitor of
+`google.com/maps`. No account, no browser, no stealth runtime, no `xvfb`.
+One warm-up request per session buys the full payload on the fast HTTP path —
+which means the browser path is unnecessary and has been dropped.
 
-Headless is not a middle option: it costs browser latency and returns endpoint
-data. Either go fast over HTTP or go complete with a real window (`xvfb` on a
-server, or a stealth-patched runtime such as `patchright`).
+Review count lives at **`[4][8]`**, exactly where gosom documents it. It read as
+absent because every request was cookieless.
+
+### The degradation is silent, and partly non-deterministic
+
+Google does not error or block when it withholds fields. It returns a
+structurally valid response with real places in it, just smaller — `[4]` stops
+at length 8 so `[4][8]` cannot exist. Nothing about the response says so.
+
+Warming the cookie is necessary but not sufficient: on a fresh session the first
+request or two may still come back trimmed, and it varies run to run (one fresh
+session returned full data three times; another returned trimmed, then full,
+then full). It reads like a propagation race on Google's side.
+
+So the parser **detects** the reduced payload structurally, on the length of
+`[4]`, and the scraper retries it. The check is deliberately structural rather
+than "did any place have a review count", because a genuinely review-free area
+would be indistinguishable under that test and would retry forever. After the
+last attempt the stripped data is kept rather than dropping the cell: a missing
+review count beats twenty missing places.
+
+Result: 20/40 places with review counts before the retry, 40/40 after.
+
+### Verify new fields against the DOM, always
+
+`[4][8]` was confirmed by diffing against the number Google renders on screen,
+7/7 exact. That step is not optional, because this payload is full of decoys:
+
+| Path | Looks like | Actually |
+| --- | --- | --- |
+| `[75][0][0][4]` | 21631, a review count | a constant — identical for every place |
+| `[37][1]` | varies per place, right magnitude | wrong values (22,853 vs a true 26,089) |
+| `[88][4][*]` | plausible integers | rendering metadata |
+
+Each is a believable integer at a believable path, and `[37][1]` was nearly
+shipped. Plausibility is not evidence; the rendered DOM is.
+
+## One extraction path
+
+There is no browser in this project. A warmed `NID` cookie gets the full payload
+over plain HTTP at ~200 ms per 20 places — roughly 10× faster than driving a
+browser, with the same fields. The browser path existed only to work around a
+problem that turned out to be a missing cookie.
+
+## Rate limits, measured
+
+53 requests across 8 US/CA cities at up to concurrency 8, from one residential IP
+with no proxy: **53/53 succeeded, 5.4 req/s, zero blocks**. Vendor blogs claim
+datacenter IPs die at 5–15 req/*minute*; we sustained ~324/minute. A later
+Brooklyn sweep ran ~1,700 requests from the same IP, also clean.
+
+That is a burst, not an eight-hour run, and it says nothing about datacenter IPs
+— which remain untested. But the working point is far higher than the vendor
+literature implies, and blocking is not the main threat. **Silent degradation
+is**: Google's response to an unwelcome client is to quietly give it less, not
+to say no.
+
+## Proxy economics
+
+Responses are ~136 KB decompressed (~12 KB on the wire — a 9× gzip ratio, so
+measure wire bytes when pricing). The duplicate rate dominates the bill: the
+Brooklyn run fetched ~1,700 requests to yield 726 unique places, since
+overlapping cells re-fetch the same businesses.
+
+| Proxy | $/GB | per 1k unique places |
+| --- | --- | --- |
+| Webshare | $1.00 | ~$0.32 |
+| IPRoyal | ~$4.90 | ~$1.50 |
+| Decodo | $3.50 | ~$1.11 |
+| Bright Data | $8.40 | ~$2.67 |
+| **Outscraper** | — | **$1–3** |
+
+With cheap proxies we are ~3–5× cheaper than buying; with premium proxies we are
+at parity. **Reducing duplicate fetches is therefore a cost optimisation, not a
+performance nicety.**

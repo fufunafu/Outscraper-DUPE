@@ -12,7 +12,8 @@ import type { BBox } from './geo/tiles.ts';
 import { centreOf } from './geo/tiles.ts';
 import { parseSearchPage } from './parse/search.ts';
 import { buildSearchUrl, PAGE_SIZE, RESULT_CAP } from './search/pb.ts';
-import { BlockedByCaptcha, fetchSearchPage, RateLimited } from './search/client.ts';
+import { BlockedByCaptcha, fetchSearchPage, RateLimited, USER_AGENT } from './search/client.ts';
+import { GoogleSession } from './search/session.ts';
 import { Deduper } from './store/dedupe.ts';
 import type { ProxyPool } from './search/proxy.ts';
 import type { Place } from './schema.ts';
@@ -66,6 +67,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function searchCell(
   cell: Cell,
   options: ScrapeOptions,
+  session: GoogleSession,
   onPlaces: (places: Place[]) => void,
 ): Promise<number> {
   const { lat, lng } = centreOf(cell.box);
@@ -83,16 +85,22 @@ async function searchCell(
       hl: options.language ?? 'en',
     });
 
-    const payload = await withRetry(() =>
-      fetchSearchPage(url, {
+    const { places } = await withRetry(async () => {
+      const payload = await fetchSearchPage(url, {
         hl: options.language,
         signal: options.signal,
+        session,
         // A fresh dispatcher per attempt, so a retry after a block leaves the
         // IP that got blocked rather than hammering it again.
         ...(options.proxies ? { dispatcher: options.proxies.next() } : {}),
-      }),
-    );
-    const { places } = parseSearchPage(payload, options.query);
+      });
+      const parsed = parseSearchPage(payload, options.query);
+      // A degraded page has real places with fields stripped. Retrying is worth
+      // it because the cause is a transient server-side race, not our request —
+      // an identical retry usually comes back full.
+      if (parsed.degraded) throw new DegradedPayload();
+      return parsed;
+    });
     if (places.length === 0) break;
 
     onPlaces(places);
@@ -103,6 +111,14 @@ async function searchCell(
   }
 
   return total;
+}
+
+/** Google returned a real but field-stripped response; an identical retry usually fixes it. */
+class DegradedPayload extends Error {
+  constructor() {
+    super('Google served a reduced payload');
+    this.name = 'DegradedPayload';
+  }
 }
 
 /**
@@ -118,7 +134,13 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
       return await fn();
     } catch (error) {
       lastError = error;
-      const retryable = error instanceof RateLimited || error instanceof BlockedByCaptcha;
+      const retryable =
+        error instanceof RateLimited ||
+        error instanceof BlockedByCaptcha ||
+        error instanceof DegradedPayload;
+      // Out of retries on a degraded page: take the stripped data rather than
+      // losing the cell entirely. Missing a review count beats missing 20 places.
+      if (error instanceof DegradedPayload && attempt === attempts - 1) throw error;
       if (!retryable || attempt === attempts - 1) throw error;
       // Jittered backoff: 1s, 2s, 4s ± 50%, so parallel workers don't retry in lockstep.
       const base = 1000 * 2 ** attempt;
@@ -137,6 +159,11 @@ export async function scrape(
   const limit = options.limit ?? Infinity;
   let truncatedByLimit = false;
 
+  // Warm a session before any searching: a cookieless request comes back
+  // missing fields rather than failing, so skipping this quietly costs data.
+  const session = new GoogleSession({ hl: options.language, userAgent: USER_AGENT });
+  await session.cookie();
+
   const coverage = await coverRegion(
     options.region,
     async (cell) => {
@@ -151,7 +178,7 @@ export async function scrape(
       // saturation is about what Google served for THIS viewport, so filtering
       // to new-only would make a heavily-overlapped cell look artificially sparse.
       const cellPlaces: Place[] = [];
-      const count = await searchCell(cell, options, (found) => {
+      const count = await searchCell(cell, options, session, (found) => {
         cellPlaces.push(...found);
         for (const place of found) {
           if (places.length >= limit) {
