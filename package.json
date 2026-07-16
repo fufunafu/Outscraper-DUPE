@@ -1,0 +1,17 @@
+{
+  "name": "outscraper-dupe",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --build",
+    "scrape": "node --experimental-strip-types apps/cli/src/index.ts"
+  }
+}
