@@ -17,7 +17,9 @@ import { toCsv } from '../../../packages/engine/src/export/csv.ts';
 import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
 import { Deduper } from '../../../packages/engine/src/store/dedupe.ts';
 import { enrichPlaces } from '../../../packages/engine/src/enrich/enrich.ts';
-import { toLabel, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
+import { findRegion, toLabel, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
+import { seedBoxes, type SeedBox } from '../../../packages/engine/src/geo/seeds.ts';
+import type { BBox } from '../../../packages/engine/src/geo/tiles.ts';
 import type { Place } from '../../../packages/engine/src/schema.ts';
 import { applyFilters, type Filters } from './filters.ts';
 
@@ -136,6 +138,22 @@ export function startJob(request: JobRequest, onUpdate: (job: Job) => void): Job
   return job;
 }
 
+/**
+ * The boxes to sweep for one location. A single city is its own geocoded box. A
+ * whole region expands into population-seeded boxes from its city list, so the
+ * empty majority of a province is never searched.
+ */
+function boxesFor(location: LocationSelection, geocodedBox: BBox): SeedBox[] {
+  if (location.city) return [{ box: geocodedBox, seeds: [location.city] }];
+  const region = findRegion(location.country, location.region);
+  if (!region || region.cities.length === 0) {
+    // No seed data for this region: fall back to its geocoded box.
+    return [{ box: geocodedBox, seeds: [location.region] }];
+  }
+  const seeds = region.cities.map((c) => ({ name: c.n, lat: c.lat, lng: c.lng, population: c.p }));
+  return seedBoxes(seeds, geocodedBox);
+}
+
 async function run(job: Job, controller: AbortController, onUpdate: (job: Job) => void): Promise<void> {
   const publish = () => onUpdate(job);
   const { pool: proxies } = await loadProxies();
@@ -167,34 +185,44 @@ async function run(job: Job, controller: AbortController, onUpdate: (job: Job) =
           if (!place) throw new Error(`Couldn't find "${toQuery(location)}" on the map.`);
 
           const before = job.places.length;
-          const baseCells = job.progress.cellsSearched;
 
-          const result = await scrape(
-            {
-              query,
-              region: place.box,
-              limit: limit === Infinity ? undefined : limit - job.places.length,
-              language: job.request.language ?? 'en',
-              // concurrency omitted: the engine scales it with the proxy count.
-              proxies,
-              signal: controller.signal,
-            },
-            (progress) => {
-              job.progress.cellsSearched = baseCells + progress.cellsSearched;
-              job.progress.cellsPending = progress.cellsPending;
-              publish();
-            },
-          );
+          // A whole region (a province/state with no city picked) is swept by
+          // population-seeded boxes, not by tiling its whole area — most of a
+          // province is empty, and blindly tiling it burns hours on wilderness.
+          // A single city keeps its geocoded box as-is.
+          const boxes = boxesFor(location, place.box);
 
-          // scrape() dedupes within its own region; this collapses across legs.
-          for (const found of result.places) {
-            if (job.places.length >= limit) break;
-            if (deduper.add(found)) job.places.push(found);
+          for (const { box } of boxes) {
+            if (controller.signal.aborted || job.places.length >= limit) break;
+            const baseCells = job.progress.cellsSearched;
+            const result = await scrape(
+              {
+                query,
+                region: box,
+                limit: limit === Infinity ? undefined : limit - job.places.length,
+                language: job.request.language ?? 'en',
+                // concurrency omitted: the engine scales it with the proxy count.
+                proxies,
+                signal: controller.signal,
+              },
+              (progress) => {
+                job.progress.cellsSearched = baseCells + progress.cellsSearched;
+                job.progress.cellsPending = progress.cellsPending;
+                publish();
+              },
+            );
+
+            // scrape() dedupes within one box; this collapses across boxes and legs.
+            for (const found of result.places) {
+              if (job.places.length >= limit) break;
+              if (deduper.add(found)) job.places.push(found);
+            }
+            job.progress.duplicates = deduper.stats.duplicates;
+            leg.found = job.places.length - before;
+            publish();
           }
 
-          leg.found = job.places.length - before;
           leg.status = 'done';
-          job.progress.duplicates = deduper.stats.duplicates;
         } catch (error) {
           if (controller.signal.aborted) throw error;
           // One bad region shouldn't lose the other twelve.
