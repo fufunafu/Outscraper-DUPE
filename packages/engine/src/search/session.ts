@@ -19,7 +19,7 @@
  * Nothing here needs a browser, a stealth plugin, or an account.
  */
 
-import type { Dispatcher } from 'undici';
+import { fetch as undiciFetch, type Dispatcher, type RequestInit as UndiciRequestInit } from 'undici';
 
 /** Cookies worth carrying. NID is the one that matters; the rest keep consent quiet. */
 const CONSENT_COOKIES = ['CONSENT=YES+cb.20260101-00-p0.en', 'SOCS=CAI'];
@@ -77,10 +77,10 @@ export class GoogleSession {
 
     const jar = [...CONSENT_COOKIES];
     try {
-      const response = await fetch(WARMUP_URL, {
+      const response = await undiciFetch(WARMUP_URL, {
         headers,
         ...(this.#options.dispatcher ? { dispatcher: this.#options.dispatcher } : {}),
-      } as RequestInit & { dispatcher?: Dispatcher });
+      } as UndiciRequestInit);
 
       for (const [name, value] of response.headers) {
         if (name.toLowerCase() !== 'set-cookie') continue;

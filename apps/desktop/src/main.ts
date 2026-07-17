@@ -10,6 +10,7 @@
 import { exec } from 'node:child_process';
 import { startServer } from './server.ts';
 import { OUTPUT_DIR } from './jobs.ts';
+import { ensureProxyTemplate, loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
 
 const PREFERRED_PORT = 4317;
 
@@ -31,11 +32,16 @@ async function listen(): Promise<string> {
   throw new Error('No free port between 4317 and 4326.');
 }
 
+await ensureProxyTemplate();
 const url = await listen();
+const { count, source } = await loadProxies();
+
 console.log(`Places Scraper running at ${url}`);
 console.log(`Exports go to ${OUTPUT_DIR}`);
-if (!process.env.PROXY_URLS) {
-  console.log('\nNo proxies configured — requests go out from this machine\'s IP.');
-  console.log('Fine for small runs. For sustained use set PROXY_URLS.');
-}
+console.log(
+  count > 0
+    ? `Using ${count} prox${count === 1 ? 'y' : 'ies'} (from ${source}).`
+    : "\nNo proxies yet — requests go out from this machine's IP.\n" +
+        'Fine for small runs. For bigger ones, add proxies to proxies.txt in the exports folder.',
+);
 if (!process.env.NO_OPEN) openBrowser(url);

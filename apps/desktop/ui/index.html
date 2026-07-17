@@ -96,6 +96,10 @@
   th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th { background:var(--chip); font-size:12px; }
   .empty { color:var(--muted); font-size:14px; text-align:center; padding:28px 0; }
+  .proxystrip { display:flex; align-items:center; gap:10px; font-size:12.5px; padding:8px 12px; border-radius:8px; margin-bottom:18px; }
+  .proxystrip.on { background:color-mix(in srgb,var(--ok) 12%,transparent); color:var(--ok); }
+  .proxystrip.off { background:color-mix(in srgb,var(--warn) 13%,transparent); color:var(--warn); }
+  .proxystrip button { margin-left:auto; }
 </style>
 </head>
 <body>
@@ -103,6 +107,7 @@
   <form class="card" id="form">
     <h1><span class="dot">◉</span> Places Scraper</h1>
     <p class="sub">Pulls business listings from Google Maps. Everything runs on this machine.</p>
+    <div id="proxyStrip" class="proxystrip"></div>
     <div id="formError"></div>
 
     <div class="field">
@@ -496,6 +501,21 @@ $('jobs').onclick = async (e) => {
 };
 
 /* ---------- boot ---------- */
+async function refreshProxies() {
+  const p = await (await fetch('/api/proxies')).json();
+  const strip = $('proxyStrip');
+  if (p.count > 0) {
+    strip.className = 'proxystrip on';
+    strip.innerHTML = `<b>●</b> Routing through ${p.count} prox${p.count===1?'y':'ies'}. Your own IP is not exposed.`;
+  } else {
+    strip.className = 'proxystrip off';
+    strip.innerHTML = `<b>●</b> No proxies — requests use this computer's IP. Fine for small runs.
+      <button type="button" class="ghost" id="openProxies">Add proxies</button>`;
+    $('openProxies').onclick = () => fetch('/api/proxies/open', {method:'POST'});
+  }
+}
+await refreshProxies();
+
 COUNTRIES = await (await fetch('/api/countries')).json();
 $('country').innerHTML = Object.entries(COUNTRIES).map(([cc, c]) =>
   `<option value="${cc}">${c.flag} ${esc(c.name)}</option>`).join('');

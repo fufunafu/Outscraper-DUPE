@@ -16,6 +16,7 @@ import { cancelJob, getJob, listJobs, startJob, OUTPUT_DIR, type Job } from './j
 import { filterConflicts } from './filters.ts';
 import { geocode, areaSquareKm } from '../../../packages/engine/src/geo/geocode.ts';
 import { searchCategories } from '../../../packages/engine/src/categories.ts';
+import { loadProxies, PROXY_FILE } from '../../../packages/engine/src/search/proxy-config.ts';
 import { COUNTRIES, citySearch, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'ui');
@@ -119,6 +120,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     listeners.add(res);
     req.on('close', () => listeners.delete(res));
     return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/proxies') {
+    const { count, source } = await loadProxies();
+    return json(res, 200, { count, source, file: PROXY_FILE });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/proxies/open') {
+    // Open the proxy file so the user can paste their Webshare URL into it.
+    revealInFinder(PROXY_FILE);
+    return json(res, 200, { ok: true });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/categories') {

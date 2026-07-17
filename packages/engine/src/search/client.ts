@@ -7,7 +7,14 @@
  * so it is the default path; the browser is reserved for detail-only fields.
  */
 
-import type { Dispatcher } from 'undici';
+import { fetch as undiciFetch, Agent, type Dispatcher, type RequestInit as UndiciRequestInit } from 'undici';
+
+/**
+ * Node's global fetch is built on its own bundled undici, which rejects a
+ * dispatcher created from the separately-installed undici with UND_ERR_INVALID_ARG.
+ * Using undici's own fetch keeps request and dispatcher on the same instance,
+ * so proxy routing actually takes effect instead of silently erroring.
+ */
 
 import { GoogleSession } from './session.ts';
 
@@ -39,6 +46,12 @@ export interface FetchOptions {
    * among them) rather than erroring — see session.ts.
    */
   session?: GoogleSession;
+}
+
+let sharedDirect: Agent | null = null;
+/** One reused Agent for un-proxied egress, instead of a fresh one per request. */
+function directDispatcher(): Agent {
+  return (sharedDirect ??= new Agent({ connections: 16 }));
 }
 
 export const USER_AGENT =
@@ -77,12 +90,11 @@ export async function fetchSearchPage(url: string, options: FetchOptions = {}): 
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
   const cookie = session ? await session.cookie() : '';
-  const response = await fetch(url, {
+  const response = await undiciFetch(url, {
     headers: headersFor(hl, cookie),
     signal: combined,
-    // `dispatcher` is an undici extension to RequestInit, not part of the DOM type.
-    ...(dispatcher ? { dispatcher } : {}),
-  } as RequestInit & { dispatcher?: Dispatcher });
+    dispatcher: dispatcher ?? directDispatcher(),
+  } as UndiciRequestInit);
 
   if (response.status === 429 || response.status === 503) {
     throw new RateLimited(`upstream returned ${response.status}`);

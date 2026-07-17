@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { scrape } from '../../../packages/engine/src/scrape.ts';
 import { geocodeOne, areaSquareKm } from '../../../packages/engine/src/geo/geocode.ts';
 import { toCsv } from '../../../packages/engine/src/export/csv.ts';
-import { proxyPoolFromEnv } from '../../../packages/engine/src/search/proxy.ts';
+import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
 import { Deduper } from '../../../packages/engine/src/store/dedupe.ts';
 import { toLabel, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
 import type { Place } from '../../../packages/engine/src/schema.ts';
@@ -133,7 +133,7 @@ export function startJob(request: JobRequest, onUpdate: (job: Job) => void): Job
 
 async function run(job: Job, controller: AbortController, onUpdate: (job: Job) => void): Promise<void> {
   const publish = () => onUpdate(job);
-  const proxies = proxyPoolFromEnv();
+  const { pool: proxies } = await loadProxies();
 
   // Dedupe spans the whole job, not each leg: adjacent provinces share border
   // towns, and the same business must not appear twice in one export.
