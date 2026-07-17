@@ -55,6 +55,25 @@ export interface ScrapeResult {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Is this place inside the region being scraped?
+ *
+ * A small margin lets in places right on the border, whose coordinates Google
+ * rounds slightly, without admitting the wrong-continent filler results that a
+ * sparse viewport pulls in. A place with no coordinates is kept — it is more
+ * likely a parse gap than a real out-of-region hit.
+ */
+function inRegion(place: Place, region: BBox): boolean {
+  if (place.latitude == null || place.longitude == null) return true;
+  const margin = 0.05; // ~5.5 km, absorbing boundary rounding
+  return (
+    place.latitude >= region.south - margin &&
+    place.latitude <= region.north + margin &&
+    place.longitude >= region.west - margin &&
+    place.longitude <= region.east + margin
+  );
+}
+
+/**
  * Page a single cell until it stops yielding, or hits the cap.
  *
  * Throws on a block rather than returning a short count. This distinction is
@@ -174,13 +193,17 @@ export async function scrape(
         return { count: 0, saturated: false };
       }
 
-      // Keep this cell's own places, including ones already seen elsewhere:
-      // saturation is about what Google served for THIS viewport, so filtering
-      // to new-only would make a heavily-overlapped cell look artificially sparse.
+      // Keep this cell's own in-region places. Google widens a search when the
+      // viewport is sparse — returning glass shops in London for a tiny empty
+      // cell in BC — and a domestic IP can bias results toward its own location.
+      // Anything outside the target region is not a lead and must be dropped;
+      // just as important, it must NOT count toward saturation, or those global
+      // filler results make an empty cell look full and drive pointless splits.
       const cellPlaces: Place[] = [];
-      const count = await searchCell(cell, options, session, (found) => {
-        cellPlaces.push(...found);
+      await searchCell(cell, options, session, (found) => {
         for (const place of found) {
+          if (!inRegion(place, options.region)) continue;
+          cellPlaces.push(place);
           if (places.length >= limit) {
             truncatedByLimit = true;
             return;
@@ -190,7 +213,7 @@ export async function scrape(
       });
 
       const { saturated } = assessSaturation(cell.box, cellPlaces);
-      return { count, saturated };
+      return { count: cellPlaces.length, saturated };
     },
     { concurrency: options.concurrency ?? 4 },
     (progress) => {
