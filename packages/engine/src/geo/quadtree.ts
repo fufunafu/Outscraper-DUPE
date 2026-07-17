@@ -40,12 +40,17 @@ export interface CoverageOptions {
 }
 
 export const DEFAULT_COVERAGE: CoverageOptions = {
-  minCellMetres: 250,
+  // Stop subdividing at ~700m diagonal (~500m cells). Below this, a single
+  // search already captures the cell's businesses and finer splitting mostly
+  // re-finds the same places — the dominant cost in dense metros. Balances
+  // coverage against the cell count: at 250m a downtown box took 349 cells to
+  // add ~50 places over what 700m finds in ~30.
+  minCellMetres: 700,
   // ~42 km sides. A rural town fits inside one such cell and is captured by its
   // single search; a metro saturates it and splits further. Small regions start
   // below this, so it only affects province/state/country-sized sweeps.
   maxCellMetres: 60_000,
-  maxDepth: 12,
+  maxDepth: 9,
 };
 
 /** What a search of one cell produced, as far as coverage is concerned. */

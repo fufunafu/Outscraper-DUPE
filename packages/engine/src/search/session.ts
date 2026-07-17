@@ -79,6 +79,10 @@ export class GoogleSession {
     try {
       const response = await undiciFetch(WARMUP_URL, {
         headers,
+        // Bound the warm-up: a dead or slow proxy must not hang the request
+        // forever. Without this, one bad IP in the pool blocks the whole scrape,
+        // since every session warms before the first search runs.
+        signal: AbortSignal.timeout(8_000),
         ...(this.#options.dispatcher ? { dispatcher: this.#options.dispatcher } : {}),
       } as UndiciRequestInit);
 

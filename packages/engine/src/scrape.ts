@@ -7,7 +7,6 @@
  */
 
 import { coverRegion, type Cell, type CoverageResult } from './geo/quadtree.ts';
-import { assessSaturation } from './geo/saturation.ts';
 import type { BBox } from './geo/tiles.ts';
 import { centreOf } from './geo/tiles.ts';
 import { parseSearchPage } from './parse/search.ts';
@@ -88,9 +87,10 @@ async function searchCell(
   options: ScrapeOptions,
   egress: EgressPool,
   onPlaces: (places: Place[]) => void,
-): Promise<number> {
+): Promise<{ total: number; hitCap: boolean }> {
   const { lat, lng } = centreOf(cell.box);
   let total = 0;
+  let hitCap = false;
 
   for (let offset = 0; offset < RESULT_CAP; offset += PAGE_SIZE) {
     options.signal?.throwIfAborted();
@@ -126,11 +126,14 @@ async function searchCell(
     onPlaces(places);
     total += places.length;
 
-    // A short page means the result list is exhausted before the cap.
+    // A short page means Google served the whole list before the cap — the cell
+    // is complete. A full page every time until the cap means the list was
+    // truncated and real places were dropped; that cell must be subdivided.
     if (places.length < PAGE_SIZE) break;
+    if (offset + PAGE_SIZE >= RESULT_CAP) hitCap = true;
   }
 
-  return total;
+  return { total, hitCap };
 }
 
 /** Google returned a real but field-stripped response; an identical retry usually fixes it. */
@@ -198,17 +201,14 @@ export async function scrape(
         return { count: 0, saturated: false };
       }
 
-      // Keep this cell's own in-region places. Google widens a search when the
-      // viewport is sparse — returning glass shops in London for a tiny empty
-      // cell in BC — and a domestic IP can bias results toward its own location.
-      // Anything outside the target region is not a lead and must be dropped;
-      // just as important, it must NOT count toward saturation, or those global
-      // filler results make an empty cell look full and drive pointless splits.
-      const cellPlaces: Place[] = [];
-      await searchCell(cell, options, egress, (found) => {
+      // Keep only in-region places. Google widens a sparse search to fill the
+      // viewport (glass shops in London for an empty BC cell) and a domestic IP
+      // biases toward its own location; those are not leads and are dropped.
+      let inRegionCount = 0;
+      const { hitCap } = await searchCell(cell, options, egress, (found) => {
         for (const place of found) {
           if (!inRegion(place, options.region)) continue;
-          cellPlaces.push(place);
+          inRegionCount += 1;
           if (places.length >= limit) {
             truncatedByLimit = true;
             return;
@@ -217,8 +217,11 @@ export async function scrape(
         }
       });
 
-      const { saturated } = assessSaturation(cell.box, cellPlaces);
-      return { count: cellPlaces.length, saturated };
+      // Subdivide only when Google truncated the list (pagination hit the cap).
+      // A cell that returned everything before the cap is complete, however many
+      // places it held — this is what stops the runaway splitting of dense-but-
+      // finite areas that a count/spread heuristic caused.
+      return { count: inRegionCount, saturated: hitCap };
     },
     { concurrency },
     (progress) => {
