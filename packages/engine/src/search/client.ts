@@ -50,7 +50,7 @@ export interface FetchOptions {
 
 let sharedDirect: Agent | null = null;
 /** One reused Agent for un-proxied egress, instead of a fresh one per request. */
-function directDispatcher(): Agent {
+export function directDispatcher(): Agent {
   return (sharedDirect ??= new Agent({ connections: 16 }));
 }
 

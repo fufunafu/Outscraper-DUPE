@@ -13,7 +13,7 @@ import { centreOf } from './geo/tiles.ts';
 import { parseSearchPage } from './parse/search.ts';
 import { buildSearchUrl, PAGE_SIZE, RESULT_CAP } from './search/pb.ts';
 import { BlockedByCaptcha, fetchSearchPage, RateLimited, USER_AGENT } from './search/client.ts';
-import { GoogleSession } from './search/session.ts';
+import { EgressPool, concurrencyFor } from './search/egress.ts';
 import { Deduper } from './store/dedupe.ts';
 import type { ProxyPool } from './search/proxy.ts';
 import type { Place } from './schema.ts';
@@ -86,7 +86,7 @@ function inRegion(place: Place, region: BBox): boolean {
 async function searchCell(
   cell: Cell,
   options: ScrapeOptions,
-  session: GoogleSession,
+  egress: EgressPool,
   onPlaces: (places: Place[]) => void,
 ): Promise<number> {
   const { lat, lng } = centreOf(cell.box);
@@ -105,13 +105,14 @@ async function searchCell(
     });
 
     const { places } = await withRetry(async () => {
+      // A different egress per attempt: a retry after a block leaves the IP that
+      // got blocked, and its cookie goes with it since they're paired.
+      const { dispatcher, session } = egress.next();
       const payload = await fetchSearchPage(url, {
         hl: options.language,
         signal: options.signal,
         session,
-        // A fresh dispatcher per attempt, so a retry after a block leaves the
-        // IP that got blocked rather than hammering it again.
-        ...(options.proxies ? { dispatcher: options.proxies.next() } : {}),
+        dispatcher,
       });
       const parsed = parseSearchPage(payload, options.query);
       // A degraded page has real places with fields stripped. Retrying is worth
@@ -178,10 +179,14 @@ export async function scrape(
   const limit = options.limit ?? Infinity;
   let truncatedByLimit = false;
 
-  // Warm a session before any searching: a cookieless request comes back
-  // missing fields rather than failing, so skipping this quietly costs data.
-  const session = new GoogleSession({ hl: options.language, userAgent: USER_AGENT });
-  await session.cookie();
+  // One egress (proxy + its own session) per exit IP. Warm them all up front so
+  // the first wave of searches doesn't race a burst of cookie warm-ups.
+  const egress = EgressPool.create(options.proxies ?? null, options.language ?? 'en', USER_AGENT);
+  await egress.warmAll();
+
+  // Concurrency scales with the number of exit IPs: more proxies, more parallel
+  // cells, up to a ceiling. An explicit option still overrides.
+  const concurrency = options.concurrency ?? concurrencyFor(egress.size);
 
   const coverage = await coverRegion(
     options.region,
@@ -200,7 +205,7 @@ export async function scrape(
       // just as important, it must NOT count toward saturation, or those global
       // filler results make an empty cell look full and drive pointless splits.
       const cellPlaces: Place[] = [];
-      await searchCell(cell, options, session, (found) => {
+      await searchCell(cell, options, egress, (found) => {
         for (const place of found) {
           if (!inRegion(place, options.region)) continue;
           cellPlaces.push(place);
@@ -215,7 +220,7 @@ export async function scrape(
       const { saturated } = assessSaturation(cell.box, cellPlaces);
       return { count: cellPlaces.length, saturated };
     },
-    { concurrency: options.concurrency ?? 4 },
+    { concurrency },
     (progress) => {
       onProgress?.({
         found: places.length,

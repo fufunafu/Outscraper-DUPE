@@ -175,7 +175,7 @@ async function run(job: Job, controller: AbortController, onUpdate: (job: Job) =
               region: place.box,
               limit: limit === Infinity ? undefined : limit - job.places.length,
               language: job.request.language ?? 'en',
-              concurrency: proxies ? 8 : 4,
+              // concurrency omitted: the engine scales it with the proxy count.
               proxies,
               signal: controller.signal,
             },
