@@ -27,7 +27,7 @@ describe('coverRegion', () => {
     const result = await coverRegion(
       MANHATTAN,
       async (cell) => ({ count: cell.depth === 0 ? 100 : 5, saturated: cell.depth === 0 }),
-      {},
+      { maxCellMetres: Infinity },
     );
 
     assert.equal(result.cellsSearched, 5, 'root plus four children');
@@ -40,7 +40,7 @@ describe('coverRegion', () => {
     const result = await coverRegion(
       MANHATTAN,
       async () => ({ count: 500, saturated: true }),
-      { maxDepth: 2, minCellMetres: 0 },
+      { maxDepth: 2, minCellMetres: 0, maxCellMetres: Infinity },
     );
 
     // Depth 0: 1 cell, depth 1: 4, depth 2: 16 — the 16 leaves stay saturated.
@@ -53,7 +53,7 @@ describe('coverRegion', () => {
     const result = await coverRegion(
       MANHATTAN,
       async () => ({ count: 500, saturated: true }),
-      { maxDepth: 20, minCellMetres: 5_000 },
+      { maxDepth: 20, minCellMetres: 5_000, maxCellMetres: Infinity },
     );
 
     // Bounded by cell size rather than depth, so it must stop well short of depth 20.
@@ -69,7 +69,7 @@ describe('coverRegion', () => {
         if (cell.depth > 0) boxes.push(cell.box);
         return { count: cell.depth === 0 ? 100 : 1, saturated: cell.depth === 0 };
       },
-      {},
+      { maxCellMetres: Infinity },
     );
 
     assert.equal(boxes.length, 4);
@@ -84,6 +84,22 @@ describe('coverRegion', () => {
     }
   });
 
+  it('subdivides a large region even when every probe is sparse', async () => {
+    // The all-of-BC failure: a huge region whose searches all come back sparse
+    // must still be broken up, or its populated edges are never reached.
+    const BC = { west: -139, south: 48, east: -114, north: 60 };
+    let searched = 0;
+    const result = await coverRegion(
+      BC,
+      async () => { searched += 1; return { count: 5, saturated: false }; },
+      { maxCellMetres: 60_000, minCellMetres: 250 },
+    );
+    // A single search of the centre would be 1. Forced subdivision must probe
+    // the whole province at ~42km resolution — hundreds of cells.
+    assert.ok(searched > 200, `expected the region tiled into many cells, got ${searched}`);
+    assert.equal(result.cellsSearched, searched);
+  });
+
   it('keeps going when a search throws', async () => {
     const result = await coverRegion(
       MANHATTAN,
@@ -91,7 +107,7 @@ describe('coverRegion', () => {
         if (cell.depth === 1) throw new Error('429 from upstream');
         return { count: 100, saturated: true };
       },
-      { maxDepth: 3 },
+      { maxDepth: 3, maxCellMetres: Infinity },
     );
 
     assert.equal(result.cellsFailed, 4, 'all four children failed');

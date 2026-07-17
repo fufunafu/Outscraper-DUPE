@@ -26,13 +26,26 @@ export interface CoverageOptions {
    * size, splitting costs more searches than it surfaces new places.
    */
   minCellMetres: number;
+  /**
+   * Always subdivide a cell larger than this, whatever its saturation. This is
+   * the floor of coverage for large regions: a province's wilderness interior
+   * probes as sparse, so pure saturation-driven splitting would search the
+   * centre once and never reach the populated edges. Forcing big cells to split
+   * guarantees every part of the region is probed at a resolution fine enough to
+   * find a metro before the adaptive logic takes over.
+   */
+  maxCellMetres: number;
   /** Hard ceiling on subdivision, as a runaway guard. */
   maxDepth: number;
 }
 
 export const DEFAULT_COVERAGE: CoverageOptions = {
   minCellMetres: 250,
-  maxDepth: 10,
+  // ~42 km sides. A rural town fits inside one such cell and is captured by its
+  // single search; a metro saturates it and splits further. Small regions start
+  // below this, so it only affects province/state/country-sized sweeps.
+  maxCellMetres: 60_000,
+  maxDepth: 12,
 };
 
 /** What a search of one cell produced, as far as coverage is concerned. */
@@ -72,10 +85,13 @@ export interface CoverageResult {
 }
 
 function shouldSubdivide(cell: Cell, outcome: CellOutcome, opts: CoverageOptions): boolean {
-  if (!outcome.saturated) return false;
   if (cell.depth >= opts.maxDepth) return false;
-  if (diagonalMetres(cell.box) <= opts.minCellMetres) return false;
-  return true;
+  const diagonal = diagonalMetres(cell.box);
+  if (diagonal <= opts.minCellMetres) return false;
+  // Force-split cells too large to trust from a single probe, before consulting
+  // saturation — otherwise a big region with an empty centre stops immediately.
+  if (diagonal > opts.maxCellMetres) return true;
+  return outcome.saturated;
 }
 
 export function rootCell(box: BBox): Cell {
