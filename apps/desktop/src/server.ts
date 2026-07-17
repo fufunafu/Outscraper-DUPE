@@ -190,6 +190,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         limit: typeof body.limit === 'number' && body.limit > 0 ? body.limit : undefined,
         filters,
         language: body.language === 'fr' ? 'fr' : 'en',
+        enrich: body.enrich === true,
       },
       broadcast,
     );

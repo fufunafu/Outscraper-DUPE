@@ -7,6 +7,7 @@
  */
 
 import { PLACE_COLUMNS, type EnrichedPlace, type Place } from '../schema.ts';
+import { ENRICHMENT_COLUMNS } from '../enrich/enrich.ts';
 
 /**
  * Does this cell risk being executed as a formula by Excel or Sheets?
@@ -60,7 +61,12 @@ export interface CsvOptions {
 }
 
 export function toCsv(places: EnrichedPlace[], options: CsvOptions = {}): string {
-  const columns = options.columns ?? [...PLACE_COLUMNS, ...(options.extraColumns ?? [])];
+  // Include enrichment columns only if some row actually has them, so a plain
+  // scrape doesn't carry nine empty columns.
+  const enriched = places.some((p) => ENRICHMENT_COLUMNS.some((c) => (p as unknown as Record<string, unknown>)[c]));
+  const columns =
+    options.columns ??
+    [...PLACE_COLUMNS, ...(enriched ? ENRICHMENT_COLUMNS : []), ...(options.extraColumns ?? [])];
 
   const lines: string[] = [columns.map((c) => escapeCell(c)).join(',')];
   for (const place of places) {

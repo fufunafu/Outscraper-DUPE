@@ -166,6 +166,15 @@
       <p class="hint" style="margin-top:14px">Filters trim the export, they don't speed up the scrape — Google has no filter parameter, so every row gets fetched either way.</p>
     </details>
 
+    <div class="field" style="border-top:1px solid var(--line); padding-top:18px; margin-top:8px">
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:600">
+        <input type="checkbox" id="enrich" style="width:16px;height:16px">
+        Find emails &amp; social profiles
+      </label>
+      <p class="hint">After scraping, visits each business's website to pull its email and social links.
+        Adds time (a second or two per site) and only works for places that have a website. Runs from this computer's IP.</p>
+    </div>
+
     <div id="estimate"></div>
     <div style="margin-top:22px"><button type="submit" class="primary" id="go">Get data</button></div>
   </form>
@@ -430,7 +439,7 @@ $('form').onsubmit = async (e) => {
   if ($('catInput').value.trim()) addCat($('catInput').value);
   $('go').disabled = true;
   try {
-    const body = { queries: [...cats], locations: [...locs.values()], language: $('language').value, filters: buildFilters() };
+    const body = { queries: [...cats], locations: [...locs.values()], language: $('language').value, filters: buildFilters(), enrich: $('enrich').checked };
     const limit = Number($('limit').value);
     if (limit > 0) body.limit = limit;
     const res = await fetch('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
@@ -469,6 +478,7 @@ function render() {
         <span><b>${p.duplicates.toLocaleString()}</b> duplicates merged</span>
         <span>${fmt((j.finishedAt ?? Date.now()) - j.startedAt)}</span>
         ${j.filtered ? `<span><b>${j.filtered.toLocaleString()}</b> removed by filters</span>` : ''}
+        ${p.enriching ? `<span style="color:var(--accent)"><b>${p.enriching.done}/${p.enriching.total}</b> sites checked, <b>${p.enriching.withEmail}</b> emails</span>` : ''}
       </div>
       ${j.legs.length > 1 ? `<div class="legs">${j.legs.map((l) =>
         `<span class="leg ${l.status}" title="${esc(l.error ?? '')}">${esc(l.label)}${l.status==='done'?` · ${l.found}`:''}</span>`).join('')}</div>` : ''}
@@ -493,7 +503,10 @@ $('jobs').onclick = async (e) => {
   const host = $(`prev-${p.dataset.preview}`);
   if (host.innerHTML) { host.innerHTML = ''; return; }
   const { places, total } = await (await fetch(`/api/jobs/${p.dataset.preview}/preview`)).json();
-  const cols = ['name','rating','reviews','phone','site','full_address','category'];
+  const hasEmail = places.some((pl) => pl.email_1);
+  const cols = hasEmail
+    ? ['name','email_1','phone','site','facebook','instagram','rating','category']
+    : ['name','rating','reviews','phone','site','full_address','category'];
   host.innerHTML = `<div class="tablewrap"><table>
     <thead><tr>${cols.map((c)=>`<th>${c}</th>`).join('')}</tr></thead>
     <tbody>${places.map((pl)=>`<tr>${cols.map((c)=>`<td>${pl[c]==null?'':esc(String(pl[c])).slice(0,60)}</td>`).join('')}</tr>`).join('')}</tbody>

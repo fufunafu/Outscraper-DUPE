@@ -16,6 +16,7 @@ import { geocodeOne, areaSquareKm } from '../../../packages/engine/src/geo/geoco
 import { toCsv } from '../../../packages/engine/src/export/csv.ts';
 import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
 import { Deduper } from '../../../packages/engine/src/store/dedupe.ts';
+import { enrichPlaces } from '../../../packages/engine/src/enrich/enrich.ts';
 import { toLabel, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
 import type { Place } from '../../../packages/engine/src/schema.ts';
 import { applyFilters, type Filters } from './filters.ts';
@@ -32,6 +33,8 @@ export interface JobRequest {
   limit?: number;
   filters?: Filters;
   language?: string;
+  /** Crawl each business website for emails and social profiles. */
+  enrich?: boolean;
 }
 
 /** One (category × location) pair — the unit of work the UI reports on. */
@@ -50,6 +53,8 @@ export interface JobProgress {
   cellsPending: number;
   legsDone: number;
   legsTotal: number;
+  /** Enrichment phase, set only while/after crawling websites for emails. */
+  enriching?: { done: number; total: number; withEmail: number };
 }
 
 export interface Job {
@@ -203,9 +208,25 @@ async function run(job: Job, controller: AbortController, onUpdate: (job: Job) =
       }
     }
 
-    const kept = applyFilters(job.places, job.request.filters ?? {});
+    let kept = applyFilters(job.places, job.request.filters ?? {});
     job.filtered = job.places.length - kept.length;
     job.places = kept;
+    publish();
+
+    if (job.request.enrich && kept.length > 0) {
+      // Enrichment fetches arbitrary business sites. It runs direct (not through
+      // the scraping proxies): each site sees only 1-3 requests, and undici's
+      // ProxyAgent is unstable against the many failing sites a real batch hits.
+      kept = await enrichPlaces(
+        kept,
+        { concurrency: 12, signal: controller.signal },
+        (pr) => {
+          job.progress.enriching = { done: pr.done, total: pr.total, withEmail: pr.withEmail };
+          publish();
+        },
+      );
+      job.places = kept;
+    }
 
     await mkdir(OUTPUT_DIR, { recursive: true });
     const path = join(OUTPUT_DIR, fileNameFor(job));
