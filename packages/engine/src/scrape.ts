@@ -9,7 +9,7 @@
 import { coverRegion, type Cell, type CoverageResult } from './geo/quadtree.ts';
 import type { BBox } from './geo/tiles.ts';
 import { centreOf } from './geo/tiles.ts';
-import { parseSearchPage } from './parse/search.ts';
+import { parseSearchPage, type ParsedSearchPage } from './parse/search.ts';
 import { buildSearchUrl, PAGE_SIZE, RESULT_CAP } from './search/pb.ts';
 import { BlockedByCaptcha, fetchSearchPage, RateLimited, USER_AGENT } from './search/client.ts';
 import { EgressPool, concurrencyFor } from './search/egress.ts';
@@ -23,13 +23,21 @@ export interface ScrapeOptions {
   /** Stop once this many unique places have been found. */
   limit?: number;
   language?: string;
-  /** Cells searched in parallel. Past ~8 the gain flattens and block risk rises. */
+  /** Cells searched in parallel. Defaults to scale with the egress pool size. */
   concurrency?: number;
   /**
    * Egress IPs to rotate through. Without one, every request carries the
    * operator's own address; a run of any size will get it rate-limited.
+   * Ignored when a pre-built `egress` pool is supplied.
    */
   proxies?: ProxyPool | null;
+  /**
+   * A pre-built, already-warmed egress pool to reuse across many scrape calls.
+   * A vertical run scrapes hundreds of boxes; building and warming a fresh pool
+   * for each would re-issue every session warm-up hundreds of times and hammer
+   * the proxies. Build one pool for the whole run and pass it here.
+   */
+  egress?: EgressPool;
   signal?: AbortSignal;
 }
 
@@ -50,8 +58,6 @@ export interface ScrapeResult {
   /** True when the run stopped early because `limit` was reached. */
   truncatedByLimit: boolean;
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Is this place inside the region being scraped?
@@ -104,23 +110,8 @@ async function searchCell(
       hl: options.language ?? 'en',
     });
 
-    const { places } = await withRetry(async () => {
-      // A different egress per attempt: a retry after a block leaves the IP that
-      // got blocked, and its cookie goes with it since they're paired.
-      const { dispatcher, session } = egress.next();
-      const payload = await fetchSearchPage(url, {
-        hl: options.language,
-        signal: options.signal,
-        session,
-        dispatcher,
-      });
-      const parsed = parseSearchPage(payload, options.query);
-      // A degraded page has real places with fields stripped. Retrying is worth
-      // it because the cause is a transient server-side race, not our request —
-      // an identical retry usually comes back full.
-      if (parsed.degraded) throw new DegradedPayload();
-      return parsed;
-    });
+    const page = await fetchPage(url, options, egress);
+    const places = page.places;
     if (places.length === 0) break;
 
     onPlaces(places);
@@ -136,41 +127,69 @@ async function searchCell(
   return { total, hitCap };
 }
 
-/** Google returned a real but field-stripped response; an identical retry usually fixes it. */
-class DegradedPayload extends Error {
-  constructor() {
-    super('Google served a reduced payload');
-    this.name = 'DegradedPayload';
-  }
-}
+/** How many times one page is retried through fresh egresses before giving up. */
+const MAX_PAGE_ATTEMPTS = 5;
 
 /**
- * Retry transient blocks with exponential backoff.
+ * Fetch and parse one page, resiliently.
  *
- * Rethrows after the last attempt instead of swallowing — see searchCell: a
- * swallowed block would be indistinguishable from an empty cell.
+ * Pacing and IP selection are the egress pool's job; this loop decides what to
+ * do with the outcome:
+ *
+ *  - **Success, full payload** → return it.
+ *  - **Success, degraded payload** (fields stripped under load) → retry a couple
+ *    of times for a full one, but if it stays degraded, RETURN it anyway. The
+ *    places are real; losing the whole cell over a missing review count is the
+ *    exact failure that stalled the province run. A cell of stripped-but-real
+ *    places beats a cell of nothing.
+ *  - **Block / rate-limit / network error** → report it as push-back so the pool
+ *    slows every IP, then retry through a different egress. Only after exhausting
+ *    attempts does it throw, which correctly fails the cell (a blocked cell must
+ *    not be mistaken for a complete one — see searchCell).
  */
-async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+async function fetchPage(url: string, options: ScrapeOptions, egress: EgressPool): Promise<ParsedSearchPage> {
+  let lastDegraded: ParsedSearchPage | null = null;
   let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt++) {
+
+  for (let attempt = 0; attempt < MAX_PAGE_ATTEMPTS; attempt++) {
+    options.signal?.throwIfAborted();
+    const exit = await egress.acquire(options.signal);
     try {
-      return await fn();
+      const payload = await fetchSearchPage(url, {
+        hl: options.language,
+        signal: options.signal,
+        session: exit.session,
+        dispatcher: exit.dispatcher,
+      });
+      const parsed = parseSearchPage(payload, options.query);
+      egress.reportSuccess(exit);
+
+      if (!parsed.degraded) return parsed;
+      // Keep the best degraded result seen; try once or twice more for a full one.
+      lastDegraded = parsed;
+      if (attempt >= 2) return parsed;
     } catch (error) {
       lastError = error;
-      const retryable =
-        error instanceof RateLimited ||
-        error instanceof BlockedByCaptcha ||
-        error instanceof DegradedPayload;
-      // Out of retries on a degraded page: take the stripped data rather than
-      // losing the cell entirely. Missing a review count beats missing 20 places.
-      if (error instanceof DegradedPayload && attempt === attempts - 1) throw error;
-      if (!retryable || attempt === attempts - 1) throw error;
-      // Jittered backoff: 1s, 2s, 4s ± 50%, so parallel workers don't retry in lockstep.
-      const base = 1000 * 2 ** attempt;
-      await sleep(base * (0.5 + Math.random()));
+      const pushback = error instanceof RateLimited || error instanceof BlockedByCaptcha;
+      egress.reportFailure(exit, { pushback });
+      // A non-network, non-block error (a genuine bug) is not worth retrying.
+      if (!pushback && !isTransientNetworkError(error)) throw error;
     }
   }
-  throw lastError;
+
+  // Out of attempts. Prefer real-but-stripped data over failing the cell.
+  if (lastDegraded) return lastDegraded;
+  throw lastError ?? new Error('page fetch failed after retries');
+}
+
+/** undici/network hiccups worth retrying, as opposed to a programming error. */
+function isTransientNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: string }).code ?? '';
+  const cause = ((error.cause as { code?: string } | undefined)?.code) ?? '';
+  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|UND_ERR|fetch failed|terminated|timeout/i.test(
+    `${error.name} ${error.message} ${code} ${cause}`,
+  );
 }
 
 export async function scrape(
@@ -182,10 +201,11 @@ export async function scrape(
   const limit = options.limit ?? Infinity;
   let truncatedByLimit = false;
 
-  // One egress (proxy + its own session) per exit IP. Warm them all up front so
-  // the first wave of searches doesn't race a burst of cookie warm-ups.
-  const egress = EgressPool.create(options.proxies ?? null, options.language ?? 'en', USER_AGENT);
-  await egress.warmAll();
+  // Reuse a pre-built, already-warmed pool when the caller supplies one (a
+  // vertical run shares one pool across hundreds of boxes). Otherwise build and
+  // warm a fresh one for this call — warming once here, not once per cell.
+  const egress = options.egress ?? EgressPool.create(options.proxies ?? null, options.language ?? 'en', USER_AGENT);
+  if (!options.egress) await egress.warmAll(options.signal);
 
   // Concurrency scales with the number of exit IPs: more proxies, more parallel
   // cells, up to a ceiling. An explicit option still overrides.

@@ -15,6 +15,8 @@ import { scrape } from '../../../packages/engine/src/scrape.ts';
 import { geocodeOne, areaSquareKm } from '../../../packages/engine/src/geo/geocode.ts';
 import { toCsv } from '../../../packages/engine/src/export/csv.ts';
 import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
+import { EgressPool } from '../../../packages/engine/src/search/egress.ts';
+import { USER_AGENT } from '../../../packages/engine/src/search/client.ts';
 import { Deduper } from '../../../packages/engine/src/store/dedupe.ts';
 import { enrichPlaces } from '../../../packages/engine/src/enrich/enrich.ts';
 import { findRegion, toLabel, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
@@ -157,6 +159,11 @@ function boxesFor(location: LocationSelection, geocodedBox: BBox): SeedBox[] {
 async function run(job: Job, controller: AbortController, onUpdate: (job: Job) => void): Promise<void> {
   const publish = () => onUpdate(job);
   const { pool: proxies } = await loadProxies();
+  // Build one egress pool for the entire job and warm it once. A vertical run
+  // scrapes hundreds of boxes; a fresh pool per box would re-warm every session
+  // hundreds of times and hammer the proxies — the pacing/robustness fix.
+  const egress = EgressPool.create(proxies, job.request.language ?? 'en', USER_AGENT);
+  await egress.warmAll(controller.signal);
 
   // Dedupe spans the whole job, not each leg: adjacent provinces share border
   // towns, and the same business must not appear twice in one export.
@@ -202,7 +209,7 @@ async function run(job: Job, controller: AbortController, onUpdate: (job: Job) =
                 limit: limit === Infinity ? undefined : limit - job.places.length,
                 language: job.request.language ?? 'en',
                 // concurrency omitted: the engine scales it with the proxy count.
-                proxies,
+                egress,
                 signal: controller.signal,
               },
               (progress) => {

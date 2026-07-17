@@ -1,15 +1,26 @@
 /**
- * An egress is one exit identity: a proxy dispatcher paired with its own warmed
- * Google session cookie.
+ * The egress pool: exit identities, pacing, health, and adaptive backoff.
  *
- * The pairing matters. Google issues a session cookie (`NID`) to a specific IP,
- * and serving a full — not degraded — response depends on the cookie matching
- * the IP it arrives from. Warming one cookie and then sending it through a
- * rotating pool of exits works at ten proxies but breaks down at a hundred: the
- * cookie no longer matches most of the IPs, and Google starts trimming fields
- * or challenging. Binding each proxy to its own session keeps identity coherent
- * however large the pool grows, which is what makes adding proxies actually
- * speed things up instead of degrading them.
+ * An egress is one exit identity — a proxy dispatcher paired with its own warmed
+ * Google session cookie. The pairing matters: Google issues a session cookie
+ * (`NID`) to a specific IP, and a full (not field-stripped) response depends on
+ * the cookie matching the IP it arrives from. One cookie sent through a rotating
+ * pool works at ten proxies and breaks at a hundred; binding each proxy to its
+ * own session keeps identity coherent as the pool grows.
+ *
+ * Beyond identity, this pool is where a long run is kept alive rather than
+ * hammering itself to death:
+ *
+ *  - **Pacing.** Each egress waits a minimum interval between its own requests,
+ *    with jitter, so no single IP is fired at a bot-like rate. Requests are
+ *    handed to the least-recently-used egress, spreading load evenly.
+ *  - **Health.** An egress that fails repeatedly is put in cooldown and skipped,
+ *    so one dead proxy can't stall the run — the classic failure where a single
+ *    hung IP froze everything.
+ *  - **Adaptive backoff.** When Google pushes back (rate limits, degraded
+ *    payloads), the pool widens every egress's interval; sustained success
+ *    narrows it again. The run speeds up when it's allowed to and slows down
+ *    when it isn't, instead of charging ahead into a block.
  */
 
 import { directDispatcher } from './client.ts';
@@ -22,67 +33,183 @@ export interface Egress {
   session: GoogleSession;
 }
 
-/**
- * Hands out egresses round-robin. With proxies, one egress per proxy IP, each
- * with its own session. Without, a single direct egress on the operator's IP.
- */
-export class EgressPool {
-  readonly #egresses: Egress[];
-  #next = 0;
+interface EgressState extends Egress {
+  /** Earliest wall-clock time this egress may be used again (pacing reservation). */
+  readyAt: number;
+  /** Failures in a row; resets on any success. */
+  consecutiveFailures: number;
+  /** While set in the future, the egress is unhealthy and skipped. */
+  cooldownUntil: number;
+}
 
-  private constructor(egresses: Egress[]) {
-    this.#egresses = egresses;
+export interface PacingOptions {
+  /** Baseline gap between two requests from the same egress, before backoff. */
+  baseIntervalMs?: number;
+  /** Consecutive failures before an egress is put in cooldown. */
+  failureThreshold?: number;
+  /** How long a cooled-down egress stays benched. */
+  cooldownMs?: number;
+  /** Ceiling on the adaptive backoff multiplier. */
+  maxBackoff?: number;
+}
+
+const DEFAULTS = {
+  baseIntervalMs: 350,
+  failureThreshold: 4,
+  cooldownMs: 60_000,
+  maxBackoff: 8,
+} satisfies Required<PacingOptions>;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Wall clock. Wrapped so tests could substitute it, and to centralise `Date.now`. */
+const now = () => Date.now();
+
+export class EgressPool {
+  readonly #egresses: EgressState[];
+  readonly #opts: Required<PacingOptions>;
+  /** Multiplier on the pacing interval, 1..maxBackoff, moved by push-back. */
+  #backoff = 1;
+
+  private constructor(egresses: Egress[], opts: Required<PacingOptions>) {
+    this.#opts = opts;
+    this.#egresses = egresses.map((e) => ({
+      ...e,
+      readyAt: 0,
+      consecutiveFailures: 0,
+      cooldownUntil: 0,
+    }));
   }
 
-  /**
-   * Build a pool from an optional proxy pool. Sessions are created here but not
-   * warmed until first use, so constructing the pool is cheap.
-   */
-  static create(proxies: ProxyPool | null, hl: string, userAgent: string): EgressPool {
+  static create(
+    proxies: ProxyPool | null,
+    hl: string,
+    userAgent: string,
+    pacing: PacingOptions = {},
+  ): EgressPool {
+    const opts = { ...DEFAULTS, ...pacing };
     if (!proxies || proxies.size === 0) {
       const dispatcher = directDispatcher();
-      return new EgressPool([{ dispatcher, session: new GoogleSession({ hl, userAgent, dispatcher }) }]);
+      // Direct egress is a single IP (the operator's own); pace it much more
+      // gently, since there is no pool to spread load across.
+      return new EgressPool([{ dispatcher, session: new GoogleSession({ hl, userAgent, dispatcher }) }], {
+        ...opts,
+        baseIntervalMs: Math.max(opts.baseIntervalMs, 1_200),
+      });
     }
     const egresses: Egress[] = [];
     for (let i = 0; i < proxies.size; i++) {
-      // proxies.next() round-robins, so this pulls each distinct dispatcher once.
       const dispatcher = proxies.next();
       egresses.push({ dispatcher, session: new GoogleSession({ hl, userAgent, dispatcher }) });
     }
-    return new EgressPool(egresses);
-  }
-
-  next(): Egress {
-    const egress = this.#egresses[this.#next % this.#egresses.length]!;
-    this.#next += 1;
-    return egress;
+    return new EgressPool(egresses, opts);
   }
 
   get size(): number {
     return this.#egresses.length;
   }
 
+  /** Current pacing multiplier, for progress/telemetry. */
+  get backoff(): number {
+    return this.#backoff;
+  }
+
+  /** Egresses not currently benched in cooldown. */
+  #healthy(at: number): EgressState[] {
+    return this.#egresses.filter((e) => e.cooldownUntil <= at);
+  }
+
   /**
-   * Warm every session up front, in parallel. Optional — sessions warm lazily on
-   * first request — but doing it once at the start avoids a burst of warm-up
-   * requests racing with the first wave of real searches.
+   * Reserve the least-recently-used healthy egress and wait until it is polite
+   * to use it. Returns the egress; the caller must report the outcome so health
+   * and backoff can adapt.
+   *
+   * If every egress is cooling down, waits for the soonest to recover rather
+   * than failing — a transient wave of blocks should pause the run, not end it.
    */
-  async warmAll(): Promise<void> {
-    await Promise.all(this.#egresses.map((e) => e.session.cookie().catch(() => undefined)));
+  async acquire(signal?: AbortSignal): Promise<Egress> {
+    for (;;) {
+      signal?.throwIfAborted();
+      const at = now();
+      const healthy = this.#healthy(at);
+
+      if (healthy.length === 0) {
+        // All benched: wait for the earliest cooldown to lift.
+        const soonest = Math.min(...this.#egresses.map((e) => e.cooldownUntil));
+        await sleep(Math.max(50, Math.min(soonest - at, this.#opts.cooldownMs)));
+        continue;
+      }
+
+      // Least-recently-used: the egress free the soonest spreads load evenly.
+      const egress = healthy.reduce((best, e) => (e.readyAt < best.readyAt ? e : best));
+      const interval = this.#opts.baseIntervalMs * this.#backoff;
+      const jitter = interval * (0.5 + Math.random()); // 0.5x–1.5x, desynchronises workers
+      const startAt = Math.max(at, egress.readyAt);
+
+      // Reserve immediately so concurrent callers don't grab the same egress.
+      egress.readyAt = startAt + jitter;
+
+      const wait = startAt - at;
+      if (wait > 0) await sleep(wait);
+      return egress;
+    }
+  }
+
+  /** A request through `egress` succeeded: clear its failures, ease global backoff. */
+  reportSuccess(egress: Egress): void {
+    const state = egress as EgressState;
+    state.consecutiveFailures = 0;
+    // Ease off slowly, so one good response after a block doesn't undo caution.
+    this.#backoff = Math.max(1, this.#backoff * 0.97);
+  }
+
+  /**
+   * A request through `egress` failed. Rate-limits and blocks widen the global
+   * backoff (Google is pushing back on everyone); repeated failures on one
+   * egress bench it, in case that specific IP is burned.
+   */
+  reportFailure(egress: Egress, options: { pushback: boolean } = { pushback: false }): void {
+    const state = egress as EgressState;
+    state.consecutiveFailures += 1;
+    if (state.consecutiveFailures >= this.#opts.failureThreshold) {
+      state.cooldownUntil = now() + this.#opts.cooldownMs;
+      state.consecutiveFailures = 0;
+    }
+    if (options.pushback) {
+      this.#backoff = Math.min(this.#opts.maxBackoff, this.#backoff * 1.5);
+    }
+  }
+
+  /** Egresses currently benched, for telemetry. */
+  get benched(): number {
+    const at = now();
+    return this.#egresses.filter((e) => e.cooldownUntil > at).length;
+  }
+
+  /**
+   * Warm every session up front, in parallel and bounded, so the first wave of
+   * searches doesn't race a burst of cookie warm-ups. Failures are swallowed —
+   * a session warms lazily on first use anyway.
+   */
+  async warmAll(signal?: AbortSignal): Promise<void> {
+    await Promise.all(
+      this.#egresses.map((e) => e.session.cookie().catch(() => undefined)),
+    );
+    signal?.throwIfAborted();
   }
 }
 
 /**
- * How many cells to search at once, given the egress pool.
+ * How many cells to search at once, given the egress pool size.
  *
- * Concurrency is bounded by exit IPs, not by the machine: each concurrent
- * request should ideally leave from a different IP so no single one is hammered.
- * More proxies therefore genuinely means more parallelism — up to a ceiling
- * where local CPU, memory, and diminishing returns take over rather than
- * Google's per-IP tolerance.
+ * Concurrency is bounded by exit IPs — each concurrent request should leave from
+ * a different IP so no single one is hammered — and by the local machine, which
+ * caps out processing a few hundred simultaneous requests. More proxies mean
+ * more parallelism up to that ceiling.
  */
 export function concurrencyFor(egressCount: number): number {
-  if (egressCount <= 1) return 4; // direct: keep it gentle on the one IP
-  // ~2 concurrent requests per IP is comfortably under any per-IP rate limit.
-  return Math.min(48, Math.max(8, egressCount * 2));
+  if (egressCount <= 1) return 3; // direct: gentle on the one IP
+  // ~1.5 concurrent per IP stays well under any per-IP limit; capped where the
+  // local machine, not Google, becomes the bottleneck.
+  return Math.min(256, Math.max(8, Math.round(egressCount * 1.5)));
 }
