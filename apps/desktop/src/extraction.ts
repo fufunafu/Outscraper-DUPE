@@ -154,39 +154,59 @@ async function run(
     // Warm the pool once for the whole run.
     await egress.warmAll(controller.signal);
 
-    let cellsBase = 0;
+    // The unit list: every (term × box). Ordered term-major so progress reads as
+    // "term N of 79", but processed by a worker pool so the proxies stay busy.
+    interface Unit { term: string; termIndex: number; boxIndex: number; }
+    const units: Unit[] = [];
     for (let ti = 0; ti < terms.length; ti++) {
-      const term = terms[ti]!;
-      extraction.progress.currentTerm = term;
+      for (let bi = 0; bi < boxes.length; bi++) units.push({ term: terms[ti]!, termIndex: ti, boxIndex: bi });
+    }
 
-      for (let bi = 0; bi < boxes.length; bi++) {
+    // Run many boxes at once so the 100-proxy pool is saturated rather than idle
+    // between small rural boxes. The egress pool's pacing is the real throttle —
+    // it keeps every IP safe no matter how many units are in flight — so unit
+    // concurrency is bounded by the pool size, not by politeness. Each scrape
+    // then uses a modest internal concurrency, since the parallel units already
+    // fill the pool.
+    const unitConcurrency = Math.max(4, Math.min(24, Math.round(egress.size / 6)));
+    const perScrapeConcurrency = Math.max(3, Math.round((egress.size * 1.5) / unitConcurrency));
+
+    let cellsTotal = 0;
+    let cursor = 0;
+    const maxTermDone = () => {
+      // termsDone advances only once every box of a term is finished.
+      let done = 0;
+      for (let ti = 0; ti < terms.length; ti++) {
+        if (boxes.every((_, bi) => db.isUnitDone(unitKey(regionKey, terms[ti]!, bi)))) done = ti + 1;
+        else break;
+      }
+      return done;
+    };
+
+    const worker = async (): Promise<void> => {
+      while (cursor < units.length) {
         controller.signal.throwIfAborted();
-        const key = unitKey(regionKey, term, bi);
+        const unit = units[cursor++]!;
+        const key = unitKey(regionKey, unit.term, unit.boxIndex);
 
         if (db.isUnitDone(key)) {
-          // Already extracted on a previous run — skip, but still count it done.
           extraction.resumed = true;
           extraction.progress.unitsDone += 1;
-          publish();
           continue;
         }
+        extraction.progress.currentTerm = unit.term;
 
-        const result = await scrape(
-          {
-            query: term,
-            region: boxes[bi]!.box,
-            language: extraction.request.language ?? 'en',
-            egress,
-            signal: controller.signal,
-          },
-          (p) => {
-            extraction.progress.cellsSearched = cellsBase + p.cellsSearched;
-            extraction.progress.backoff = egress.backoff;
-            extraction.progress.benched = egress.benched;
-            publish();
-          },
-        );
-        cellsBase = extraction.progress.cellsSearched;
+        const result = await scrape({
+          query: unit.term,
+          region: boxes[unit.boxIndex]!.box,
+          language: extraction.request.language ?? 'en',
+          concurrency: perScrapeConcurrency,
+          egress,
+          signal: controller.signal,
+        }, (p) => {
+          extraction.progress.cellsSearched = cellsTotal + p.cellsSearched;
+        });
+        cellsTotal = extraction.progress.cellsSearched;
 
         // Persist this box's places; count only genuinely new ones.
         const { inserted } = db.upsertMany(result.places);
@@ -195,12 +215,14 @@ async function run(
 
         db.markUnitDone(key, result.places.length);
         extraction.progress.unitsDone += 1;
+        extraction.progress.termsDone = maxTermDone();
+        extraction.progress.backoff = egress.backoff;
+        extraction.progress.benched = egress.benched;
         publish();
       }
+    };
 
-      extraction.progress.termsDone = ti + 1;
-      publish();
-    }
+    await Promise.all(Array.from({ length: unitConcurrency }, worker));
 
     extraction.status = 'done';
     extraction.finishedAt = Date.now();
