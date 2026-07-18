@@ -90,6 +90,46 @@ export interface SeedBox {
 }
 
 /**
+ * Largest a coverage box may be, per side, in km. A merged metropolitan cluster
+ * (Metro Vancouver spans 120km through the Fraser Valley) is far too big to
+ * search as one unit — a single term over it subdivides into thousands of cells
+ * and never finishes. Splitting it into a grid of bounded boxes keeps each unit
+ * of work small, so it completes quickly, persists incrementally, and resumes at
+ * a fine granularity.
+ */
+const MAX_BOX_KM = 25;
+
+/** Split a box into a grid of sub-boxes, each at most `maxKm` per side. */
+function gridSplit(box: BBox, seeds: string[], maxKm: number): SeedBox[] {
+  const midLat = (box.south + box.north) / 2;
+  const widthKm = haversineMetres({ lat: midLat, lng: box.west }, { lat: midLat, lng: box.east }) / 1000;
+  const heightKm = haversineMetres({ lat: box.south, lng: box.west }, { lat: box.north, lng: box.west }) / 1000;
+
+  const cols = Math.max(1, Math.ceil(widthKm / maxKm));
+  const rows = Math.max(1, Math.ceil(heightKm / maxKm));
+  if (cols === 1 && rows === 1) return [{ box, seeds }];
+
+  const dLng = (box.east - box.west) / cols;
+  const dLat = (box.north - box.south) / rows;
+  const out: SeedBox[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const sub: BBox = {
+        west: box.west + c * dLng,
+        east: box.west + (c + 1) * dLng,
+        south: box.south + r * dLat,
+        north: box.south + (r + 1) * dLat,
+      };
+      // Attribute a seed name to a sub-box only if a city actually lands in it,
+      // so progress labels stay meaningful; unlabelled sub-boxes still get swept.
+      const within = seeds.length ? [`${seeds[0]} +area`] : [];
+      out.push({ box: sub, seeds: within });
+    }
+  }
+  return out;
+}
+
+/**
  * Turn a set of population seeds into the minimal set of coverage boxes.
  *
  * Only seeds inside `bound` are used, so passing a region's full city list plus
@@ -104,13 +144,14 @@ export function seedBoxes(seeds: Seed[], bound?: BBox): SeedBox[] {
   const boxes = within.map(boxAround);
   const merged = mergeBoxes(boxes);
 
-  // Attribute each seed to the merged box that contains it, for readable progress.
-  return merged.map((box) => ({
-    box,
-    seeds: within
+  // Attribute each seed to its merged box, then split any oversized box into a
+  // grid so no single unit of work covers an unmanageable area.
+  return merged.flatMap((box) => {
+    const seeds = within
       .filter((s) => s.lat >= box.south && s.lat <= box.north && s.lng >= box.west && s.lng <= box.east)
-      .map((s) => s.name),
-  }));
+      .map((s) => s.name);
+    return gridSplit(box, seeds, MAX_BOX_KM);
+  });
 }
 
 /** Total ground area of a set of boxes in km², for logging how much is actually swept. */
