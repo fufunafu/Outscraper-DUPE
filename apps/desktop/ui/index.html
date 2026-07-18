@@ -96,6 +96,9 @@
   th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th { background:var(--chip); font-size:12px; }
   .empty { color:var(--muted); font-size:14px; text-align:center; padding:28px 0; }
+  .tabs-bar { display:flex; gap:6px; margin-bottom:18px; }
+  .tab { background:transparent; border:1px solid var(--line); color:var(--muted); padding:9px 18px; border-radius:10px; font:inherit; font-weight:600; font-size:14px; cursor:pointer; }
+  .tab[aria-selected=true] { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
   .proxystrip { display:flex; align-items:center; gap:10px; font-size:12.5px; padding:8px 12px; border-radius:8px; margin-bottom:18px; }
   .proxystrip.on { background:color-mix(in srgb,var(--ok) 12%,transparent); color:var(--ok); }
   .proxystrip.off { background:color-mix(in srgb,var(--warn) 13%,transparent); color:var(--warn); }
@@ -104,6 +107,12 @@
 </head>
 <body>
 <div class="wrap">
+  <div class="tabs-bar" role="tablist">
+    <button class="tab" id="tabScrapeBtn" role="tab" aria-selected="true">Quick scrape</button>
+    <button class="tab" id="tabDbBtn" role="tab" aria-selected="false">Database</button>
+  </div>
+
+  <div id="tab-scrape">
   <form class="card" id="form">
     <h1><span class="dot">◉</span> Places Scraper</h1>
     <p class="sub">Pulls business listings from Google Maps. Everything runs on this machine.</p>
@@ -183,6 +192,62 @@
     <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">↓</span> Runs</h1>
     <div id="jobs"><p class="empty">No runs yet. Results are saved to <code>Documents/Places Scraper</code>.</p></div>
   </div>
+  </div><!-- /tab-scrape -->
+
+  <div id="tab-database" hidden>
+    <div class="card">
+      <h1><span class="dot">▦</span> Build your database</h1>
+      <p class="sub">Sweep an entire vertical across a province, once. Every business lands in a local database you can query instantly, forever — no re-scraping.</p>
+      <div id="extractError"></div>
+      <div class="row" style="grid-template-columns:1fr 170px 1fr; gap:12px; align-items:end">
+        <div class="field" style="margin:0">
+          <label for="vertical">Vertical</label>
+          <select id="vertical"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label for="extractCountry">Country</label>
+          <select id="extractCountry"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label for="extractRegion">Province / State</label>
+          <select id="extractRegion"></select>
+        </div>
+      </div>
+      <p class="hint" id="extractEstimate" style="margin-top:12px"></p>
+      <div style="margin-top:18px"><button class="primary" id="buildBtn">Build database</button></div>
+      <div id="extractions" style="margin-top:18px"></div>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">⌕</span> Query the database <span id="dbCount" class="status" style="margin-left:8px"></span></h1>
+      <p class="sub">Filter what you've collected. Instant, offline, free — no scraping.</p>
+      <div class="row" style="grid-template-columns:1fr 1fr; gap:12px">
+        <div class="field" style="margin-bottom:12px">
+          <label for="qCategory">Category</label>
+          <select id="qCategory"><option value="">Any category</option></select>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="qCity">City</label>
+          <select id="qCity"><option value="">Any city</option></select>
+        </div>
+      </div>
+      <div class="chips" style="margin-bottom:12px">
+        <button type="button" class="chip" data-q="hasEmail" aria-pressed="false">Has email</button>
+        <button type="button" class="chip" data-q="hasPhone" aria-pressed="false">Has phone</button>
+        <button type="button" class="chip" data-q="hasWebsite" aria-pressed="false">Has website</button>
+      </div>
+      <div class="row" style="grid-template-columns:1fr 1fr 2fr; gap:12px">
+        <div class="field" style="margin:0"><label for="qMinRating">Min rating</label><input type="number" id="qMinRating" min="0" max="5" step="0.1" placeholder="any"></div>
+        <div class="field" style="margin:0"><label for="qMinReviews">Min reviews</label><input type="number" id="qMinReviews" min="0" step="1" placeholder="any"></div>
+        <div class="field" style="margin:0"><label for="qSearch">Name contains</label><input type="text" id="qSearch" placeholder="e.g. glass"></div>
+      </div>
+      <div class="actions" style="margin-top:16px">
+        <button class="primary" id="queryBtn">Search</button>
+        <button class="ghost" id="exportBtn">Export all matches to CSV</button>
+      </div>
+      <div id="queryResults"></div>
+    </div>
+  </div><!-- /tab-database -->
 </div>
 
 <script type="module">
@@ -534,13 +599,156 @@ $('country').innerHTML = Object.entries(COUNTRIES).map(([cc, c]) =>
   `<option value="${cc}">${c.flag} ${esc(c.name)}</option>`).join('');
 $('country').onchange = () => { locs.clear(); expanded.clear(); renderLocTokens(); renderLocPop(); updateEstimate(); };
 
+/* ================= DATABASE TAB ================= */
+const extractions = new Map();
+
+// Tabs
+$('tabScrapeBtn').onclick = () => switchTab('scrape');
+$('tabDbBtn').onclick = () => switchTab('database');
+function switchTab(which) {
+  const db = which === 'database';
+  $('tab-scrape').hidden = db;
+  $('tab-database').hidden = !db;
+  $('tabScrapeBtn').setAttribute('aria-selected', String(!db));
+  $('tabDbBtn').setAttribute('aria-selected', String(db));
+  if (db) { refreshDbStats(); }
+}
+
+// Vertical + region pickers
+const VERTICALS = await (await fetch('/api/verticals')).json();
+$('vertical').innerHTML = VERTICALS.map(v => `<option value="${v.name}">${v.name[0].toUpperCase()+v.name.slice(1)} (${v.terms} terms)</option>`).join('');
+$('extractCountry').innerHTML = Object.entries(COUNTRIES).map(([cc,c]) => `<option value="${cc}">${c.flag} ${esc(c.name)}</option>`).join('');
+function fillRegions() {
+  const cc = $('extractCountry').value;
+  $('extractRegion').innerHTML = (COUNTRIES[cc]?.regions ?? []).map(r => `<option value="${r.code}">${r.code} — ${esc(r.name)}</option>`).join('');
+  updateExtractEstimate();
+}
+$('extractCountry').onchange = fillRegions;
+$('extractRegion').onchange = updateExtractEstimate;
+$('vertical').onchange = updateExtractEstimate;
+fillRegions();
+
+function updateExtractEstimate() {
+  const v = VERTICALS.find(x => x.name === $('vertical').value);
+  const cc = $('extractCountry').value, rc = $('extractRegion').value;
+  const region = COUNTRIES[cc]?.regions.find(r => r.code === rc);
+  if (!v || !region) { $('extractEstimate').textContent = ''; return; }
+  const cities = region.cities.length;
+  $('extractEstimate').innerHTML = `<b>${v.terms} terms</b> × ~${cities} seed cities across <b>${esc(region.name)}</b>. ` +
+    `Runs for a while (minutes to hours depending on proxies), writes every business to your database, and is <b>resumable</b> — safe to stop and restart.`;
+}
+
+$('buildBtn').onclick = async () => {
+  $('extractError').innerHTML = '';
+  $('buildBtn').disabled = true;
+  try {
+    const body = { vertical: $('vertical').value, location: { country: $('extractCountry').value, region: $('extractRegion').value }, language: $('language').value };
+    const res = await fetch('/api/extractions', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Could not start.');
+    extractions.set(data.id, data); renderExtractions();
+  } catch (err) { $('extractError').innerHTML = `<div class="banner err">${esc(err.message)}</div>`; }
+  finally { $('buildBtn').disabled = false; }
+};
+
+function renderExtractions() {
+  const all = [...extractions.values()].sort((a,b)=>b.startedAt-a.startedAt);
+  const host = $('extractions');
+  if (!all.length) { host.innerHTML = ''; return; }
+  host.innerHTML = all.map(e => {
+    const p = e.progress;
+    const running = e.status==='running'||e.status==='starting';
+    const pct = p.unitsTotal ? Math.round(100*p.unitsDone/p.unitsTotal) : 0;
+    const elapsed = fmt((e.finishedAt ?? Date.now()) - e.startedAt);
+    return `<div class="job">
+      <div class="head">
+        <div><h3>${esc(e.request.vertical)} — ${esc(e.request.location.region)}</h3>
+          <div class="meta">${e.resumed ? 'resumed · ' : ''}${p.termsDone}/${p.termsTotal} terms${p.currentTerm && running ? ` · now: ${esc(p.currentTerm)}` : ''}</div></div>
+        <span class="status ${e.status}">${e.status}</span>
+      </div>
+      ${running ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+      ${e.error ? `<div class="banner err" style="margin:12px 0 0">${esc(e.error)}</div>` : ''}
+      <div class="stats" style="margin-top:10px">
+        <span><b>${p.placesInDb.toLocaleString()}</b> in database</span>
+        <span><b>${p.newThisRun.toLocaleString()}</b> new this run</span>
+        <span><b>${p.unitsDone}</b>/${p.unitsTotal} units</span>
+        <span><b>${p.cellsSearched.toLocaleString()}</b> areas</span>
+        <span>${elapsed}</span>
+        ${p.benched ? `<span style="color:var(--warn)">${p.benched} IPs resting</span>` : ''}
+        ${p.backoff > 1.2 ? `<span style="color:var(--warn)">throttled ${p.backoff.toFixed(1)}×</span>` : ''}
+      </div>
+      ${running ? `<div class="actions"><button class="ghost" data-cancelext="${e.id}">Stop (resumable)</button></div>` : ''}
+    </div>`;
+  }).join('');
+}
+$('extractions').onclick = (ev) => {
+  const c = ev.target.closest('[data-cancelext]');
+  if (c) fetch(`/api/extractions/${c.dataset.cancelext}/cancel`, {method:'POST'});
+};
+
+// ---- Query the database ----
+const qFilters = new Set();
+document.querySelector('#tab-database .chips').onclick = (e) => {
+  const chip = e.target.closest('.chip'); if (!chip) return;
+  const k = chip.dataset.q, on = chip.getAttribute('aria-pressed')==='true';
+  chip.setAttribute('aria-pressed', String(!on));
+  on ? qFilters.delete(k) : qFilters.add(k);
+};
+
+async function refreshDbStats() {
+  const s = await (await fetch('/api/database/stats')).json();
+  $('dbCount').textContent = `${s.count.toLocaleString()} places`;
+  $('qCategory').innerHTML = '<option value="">Any category</option>' + s.categories.map(c => `<option value="${esc(c.value)}">${esc(c.value)} (${c.count})</option>`).join('');
+  $('qCity').innerHTML = '<option value="">Any city</option>' + s.cities.map(c => `<option value="${esc(c.value)}">${esc(c.value)} (${c.count})</option>`).join('');
+}
+
+function buildQuery() {
+  const f = {};
+  if ($('qCategory').value) f.category = $('qCategory').value;
+  if ($('qCity').value) f.city = $('qCity').value;
+  for (const k of qFilters) f[k] = true;
+  const mr = Number($('qMinRating').value); if (mr>0) f.minRating = mr;
+  const mv = Number($('qMinReviews').value); if (mv>0) f.minReviews = mv;
+  if ($('qSearch').value.trim()) f.search = $('qSearch').value.trim();
+  return f;
+}
+
+$('queryBtn').onclick = async () => {
+  const { places, count } = await (await fetch('/api/database/query', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
+  const cols = ['name','category','city','phone','email_1','site','rating','reviews'];
+  $('queryResults').innerHTML = places.length ? `<div class="tablewrap"><table>
+    <thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+    <tbody>${places.map(p=>`<tr>${cols.map(c=>`<td>${p[c]==null?'':esc(String(p[c])).slice(0,50)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div><p class="hint">Showing ${places.length} matches (of ${count.toLocaleString()} in database). Export gets them all.</p>`
+   : `<p class="empty">No matches. ${count?'':'Build a database first.'}</p>`;
+};
+
+$('exportBtn').onclick = async () => {
+  $('exportBtn').disabled = true; $('exportBtn').textContent = 'Exporting…';
+  try {
+    const label = [$('vertical').value, $('extractRegion').value, $('qCategory').value].filter(Boolean).join('-') || 'places';
+    const { path, rows } = await (await fetch('/api/database/export', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
+    await fetch('/api/reveal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
+    $('exportBtn').textContent = `Exported ${rows.toLocaleString()} rows ✓`;
+  } catch { $('exportBtn').textContent = 'Export failed'; }
+  finally { $('exportBtn').disabled = false; setTimeout(()=>{$('exportBtn').textContent='Export all matches to CSV';}, 3000); }
+};
+
 const events = new EventSource('/api/events');
 events.onmessage = (e) => {
   const m = JSON.parse(e.data);
-  if (m.type === 'hello') { for (const j of m.jobs) jobs.set(j.id, j); render(); }
+  if (m.type === 'hello') {
+    for (const j of m.jobs) jobs.set(j.id, j);
+    for (const x of (m.extractions ?? [])) extractions.set(x.id, x);
+    render(); renderExtractions();
+  }
   else if (m.type === 'job') { jobs.set(m.job.id, m.job); render(); }
+  else if (m.type === 'extraction') { extractions.set(m.extraction.id, m.extraction); renderExtractions(); }
 };
-setInterval(() => { if ([...jobs.values()].some((j)=>j.status==='running'||j.status==='starting')) render(); }, 1000);
+setInterval(() => {
+  if ([...jobs.values()].some((j)=>j.status==='running'||j.status==='starting')) render();
+  if ([...extractions.values()].some((x)=>x.status==='running'||x.status==='starting')) renderExtractions();
+}, 1000);
 </script>
 </body>
 </html>

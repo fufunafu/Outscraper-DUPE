@@ -18,6 +18,12 @@ import { geocode, areaSquareKm } from '../../../packages/engine/src/geo/geocode.
 import { searchCategories } from '../../../packages/engine/src/categories.ts';
 import { loadProxies, PROXY_FILE } from '../../../packages/engine/src/search/proxy-config.ts';
 import { COUNTRIES, citySearch, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
+import { verticalNames, verticalTerms } from '../../../packages/engine/src/verticals.ts';
+import {
+  startExtraction, cancelExtraction, listExtractions, openDatabase, exportDatabase,
+  type Extraction,
+} from './extraction.ts';
+import type { PlaceQuery } from '../../../packages/engine/src/store/database.ts';
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'ui');
 
@@ -33,9 +39,12 @@ const listeners = new Set<ServerResponse>();
 
 function broadcast(job: Job): void {
   const payload = JSON.stringify({ type: 'job', job: summarise(job) });
-  for (const res of listeners) {
-    res.write(`data: ${payload}\n\n`);
-  }
+  for (const res of listeners) res.write(`data: ${payload}\n\n`);
+}
+
+function broadcastExtraction(extraction: Extraction): void {
+  const payload = JSON.stringify({ type: 'extraction', extraction });
+  for (const res of listeners) res.write(`data: ${payload}\n\n`);
 }
 
 /**
@@ -116,7 +125,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
-    res.write(`data: ${JSON.stringify({ type: 'hello', jobs: listJobs().map(summarise) })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'hello', jobs: listJobs().map(summarise), extractions: listExtractions() })}\n\n`);
     listeners.add(res);
     req.on('close', () => listeners.delete(res));
     return;
@@ -131,6 +140,61 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // Open the proxy file so the user can paste their Webshare URL into it.
     revealInFinder(PROXY_FILE);
     return json(res, 200, { ok: true });
+  }
+
+  // --- Verticals & database extraction ---
+  if (req.method === 'GET' && url.pathname === '/api/verticals') {
+    return json(res, 200, verticalNames().map((name) => ({ name, terms: verticalTerms(name).length })));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/extractions') {
+    const body = (await readBody(req)) as { vertical?: string; location?: LocationSelection; language?: string };
+    if (!body.vertical || !body.location?.country || !body.location?.region) {
+      return json(res, 400, { error: 'Pick a vertical and a province/state.' });
+    }
+    const extraction = startExtraction(
+      { vertical: body.vertical, location: body.location, language: body.language === 'fr' ? 'fr' : 'en' },
+      broadcastExtraction,
+    );
+    return json(res, 202, extraction);
+  }
+
+  if (req.method === 'POST' && url.pathname.startsWith('/api/extractions/') && url.pathname.endsWith('/cancel')) {
+    const id = url.pathname.split('/')[3]!;
+    const cancelled = cancelExtraction(id);
+    return json(res, cancelled ? 200 : 404, { cancelled });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/database/stats') {
+    const db = openDatabase();
+    try {
+      return json(res, 200, {
+        count: db.count,
+        categories: db.facet('category').slice(0, 60),
+        cities: db.facet('city').slice(0, 60),
+        states: db.facet('state'),
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/database/query') {
+    const filter = (await readBody(req)) as PlaceQuery;
+    const db = openDatabase();
+    try {
+      const places = db.query({ ...filter, limit: Math.min(filter.limit ?? 200, 500) });
+      return json(res, 200, { places, count: db.count });
+    } finally {
+      db.close();
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/database/export') {
+    const body = (await readBody(req)) as { filter?: PlaceQuery; label?: string };
+    // No row cap on export: unlike the on-screen preview, a CSV should be complete.
+    const { path, rows } = await exportDatabase(body.filter ?? {}, body.label ?? 'places-export');
+    return json(res, 200, { path, rows });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/categories') {
