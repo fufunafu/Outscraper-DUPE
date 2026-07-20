@@ -635,7 +635,7 @@ function updateExtractEstimate() {
   if (!v || !region) { $('extractEstimate').textContent = ''; return; }
   const cities = region.cities.length;
   $('extractEstimate').innerHTML = `<b>${v.terms} terms</b> × ~${cities} seed cities across <b>${esc(region.name)}</b>. ` +
-    `Runs for a while (minutes to hours depending on proxies), writes every business to your database, and is <b>resumable</b> — safe to stop and restart.`;
+    `Runs for a while, writes every business to your database, and is <b>resumable</b>. Google returns a different ~50% sample each time, so run it <b>several times over a few days</b> — each pass adds the businesses the last one missed, converging past any single scrape.`;
 }
 
 $('buildBtn').onclick = async () => {
@@ -663,7 +663,7 @@ function renderExtractions() {
     return `<div class="job">
       <div class="head">
         <div><h3>${esc(e.request.vertical)} — ${esc(e.request.location.region)}</h3>
-          <div class="meta">${e.resumed ? 'resumed · ' : ''}${p.termsDone}/${p.termsTotal} terms${p.currentTerm && running ? ` · now: ${esc(p.currentTerm)}` : ''}</div></div>
+          <div class="meta">${p.pass ? `pass ${p.pass}${p.resuming?' (resumed)':''} · ` : ''}${p.termsDone}/${p.termsTotal} terms${p.currentTerm && running ? ` · now: ${esc(p.currentTerm)}` : ''}</div></div>
         <span class="status ${e.status}">${e.status}</span>
       </div>
       ${running ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}

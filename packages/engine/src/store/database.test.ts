@@ -92,6 +92,30 @@ describe('PlaceDatabase', () => {
     }
   });
 
+  it('resolves passes: resumes an unfinished one, else starts the next', () => {
+    const { db, path } = freshDb();
+    try {
+      // First call starts pass 1.
+      const a = db.resolvePass('CA/BC', 'construction');
+      assert.deepEqual(a, { pass: 1, resuming: false });
+      // Pass 1 unfinished — a repeat call resumes it, not a new pass.
+      const b = db.resolvePass('CA/BC', 'construction');
+      assert.deepEqual(b, { pass: 1, resuming: true });
+      // Finish pass 1; next call opens pass 2.
+      db.completePass('CA/BC', 'construction', 1, 500);
+      const c = db.resolvePass('CA/BC', 'construction');
+      assert.deepEqual(c, { pass: 2, resuming: false });
+      // A different vertical/region is independent.
+      assert.deepEqual(db.resolvePass('CA/BC', 'medical'), { pass: 1, resuming: false });
+      assert.equal(db.passHistory('CA/BC', 'construction')[0]!.pass, 2);
+    } finally {
+      db.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
   it('facets return value counts for the query UI', () => {
     const { db, path } = freshDb();
     try {

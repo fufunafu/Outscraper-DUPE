@@ -50,6 +50,9 @@ export interface ExtractionProgress {
   currentTerm?: string;
   termsDone: number;
   termsTotal: number;
+  /** Which accumulation pass this is, and whether it resumed an interrupted one. */
+  pass: number;
+  resuming: boolean;
   cellsSearched: number;
   /** Adaptive backoff multiplier and benched IP count, for a health readout. */
   backoff: number;
@@ -87,9 +90,9 @@ export function cancelExtraction(id: string): boolean {
   return true;
 }
 
-/** Stable key for one unit of work, so resuming can tell what is already done. */
-function unitKey(region: string, term: string, boxIndex: number): string {
-  return `${region}|${term}|box${boxIndex}`;
+/** Stable key for one unit of work in a given pass, for resume tracking. */
+function unitKey(region: string, pass: number, term: string, boxIndex: number): string {
+  return `${region}|p${pass}|${term}|box${boxIndex}`;
 }
 
 export function startExtraction(request: ExtractionRequest, onUpdate: (e: Extraction) => void): Extraction {
@@ -111,6 +114,8 @@ export function startExtraction(request: ExtractionRequest, onUpdate: (e: Extrac
       newThisRun: 0,
       termsDone: 0,
       termsTotal: terms.length,
+      pass: 0,
+      resuming: false,
       cellsSearched: 0,
       backoff: 1,
       benched: 0,
@@ -146,6 +151,11 @@ async function run(
         : [{ box: geo.box, seeds: [location.region] }];
 
     const regionKey = `${location.country}/${location.region}`;
+    // Resume an interrupted pass, or start the next one — each pass accumulates
+    // the ~40–50% of businesses the previous passes' samples missed.
+    const { pass, resuming } = db.resolvePass(regionKey, extraction.request.vertical);
+    extraction.progress.pass = pass;
+    extraction.progress.resuming = resuming;
     extraction.progress.unitsTotal = terms.length * boxes.length;
     extraction.progress.placesInDb = db.count;
     extraction.status = 'running';
@@ -177,7 +187,7 @@ async function run(
       // termsDone advances only once every box of a term is finished.
       let done = 0;
       for (let ti = 0; ti < terms.length; ti++) {
-        if (boxes.every((_, bi) => db.isUnitDone(unitKey(regionKey, terms[ti]!, bi)))) done = ti + 1;
+        if (boxes.every((_, bi) => db.isUnitDone(unitKey(regionKey, pass, terms[ti]!, bi)))) done = ti + 1;
         else break;
       }
       return done;
@@ -187,7 +197,7 @@ async function run(
       while (cursor < units.length) {
         controller.signal.throwIfAborted();
         const unit = units[cursor++]!;
-        const key = unitKey(regionKey, unit.term, unit.boxIndex);
+        const key = unitKey(regionKey, pass, unit.term, unit.boxIndex);
 
         if (db.isUnitDone(key)) {
           extraction.resumed = true;
@@ -224,6 +234,7 @@ async function run(
 
     await Promise.all(Array.from({ length: unitConcurrency }, worker));
 
+    db.completePass(regionKey, extraction.request.vertical, pass, extraction.progress.newThisRun);
     extraction.status = 'done';
     extraction.finishedAt = Date.now();
   } catch (error) {

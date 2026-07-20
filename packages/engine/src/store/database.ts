@@ -101,6 +101,16 @@ export class PlaceDatabase {
         completed_at INTEGER NOT NULL,
         place_count INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS passes (
+        region TEXT NOT NULL,
+        vertical TEXT NOT NULL,
+        pass INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        new_places INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (region, vertical, pass)
+      );
     `);
   }
 
@@ -239,6 +249,45 @@ export class PlaceDatabase {
   get unitsDone(): number {
     const row = this.#db.prepare('SELECT COUNT(*) AS n FROM completed_units').get() as { n: number };
     return row.n;
+  }
+
+  // --- Multi-pass accumulation -------------------------------------------------
+
+  /**
+   * Which pass to run for this region+vertical.
+   *
+   * Google Maps returns a different ~50–60% sample of a region each time, so a
+   * single pass is never complete. Repeated passes accumulate the businesses
+   * earlier passes missed — the database converges toward the true population
+   * where a one-shot export cannot. An interrupted pass is resumed (so a crash
+   * doesn't waste work); a finished one bumps to the next pass, which re-sweeps
+   * everything and folds new finds into the same deduplicated table.
+   */
+  resolvePass(region: string, vertical: string, at = Date.now()): { pass: number; resuming: boolean } {
+    const latest = this.#db
+      .prepare('SELECT pass, completed_at FROM passes WHERE region = ? AND vertical = ? ORDER BY pass DESC LIMIT 1')
+      .get(region, vertical) as { pass: number; completed_at: number | null } | undefined;
+
+    if (latest && latest.completed_at === null) return { pass: latest.pass, resuming: true };
+
+    const next = (latest?.pass ?? 0) + 1;
+    this.#db
+      .prepare('INSERT INTO passes (region, vertical, pass, started_at) VALUES (?, ?, ?, ?)')
+      .run(region, vertical, next, at);
+    return { pass: next, resuming: false };
+  }
+
+  completePass(region: string, vertical: string, pass: number, newPlaces: number, at = Date.now()): void {
+    this.#db
+      .prepare('UPDATE passes SET completed_at = ?, new_places = ? WHERE region = ? AND vertical = ? AND pass = ?')
+      .run(at, newPlaces, region, vertical, pass);
+  }
+
+  /** Pass history for a region+vertical, newest first, for the UI. */
+  passHistory(region: string, vertical: string): { pass: number; completed_at: number | null; new_places: number }[] {
+    return this.#db
+      .prepare('SELECT pass, completed_at, new_places FROM passes WHERE region = ? AND vertical = ? ORDER BY pass DESC')
+      .all(region, vertical) as { pass: number; completed_at: number | null; new_places: number }[];
   }
 
   close(): void {
