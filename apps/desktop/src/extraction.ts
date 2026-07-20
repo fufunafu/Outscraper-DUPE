@@ -32,6 +32,15 @@ import { registerPool } from './health.ts';
 
 export const DATABASE_PATH = join(OUTPUT_DIR, 'places.db');
 
+/**
+ * A unit is abandoned only if it makes NO progress — no newly searched cell —
+ * for this long. A slow but advancing metro box keeps running as long as it
+ * needs; only a genuinely hung unit (a cell whose request never returns) trips
+ * the watchdog. This keeps the region, and the whole 64-region campaign behind
+ * it, from freezing on one bad unit. Abandoned units retry next cycle.
+ */
+const UNIT_STALL_MS = 3 * 60_000;
+
 export interface ExtractionRequest {
   vertical: string;
   /** A whole province/state — no city; extraction is a region-scale operation. */
@@ -55,6 +64,8 @@ export interface ExtractionProgress {
   pass: number;
   resuming: boolean;
   cellsSearched: number;
+  /** Units abandoned after exceeding the per-unit deadline; retried next cycle. */
+  unitsTimedOut: number;
   /** Adaptive backoff multiplier and benched IP count, for a health readout. */
   backoff: number;
   benched: number;
@@ -127,6 +138,7 @@ export function startExtraction(request: ExtractionRequest, onUpdate: (e: Extrac
       pass: 0,
       resuming: false,
       cellsSearched: 0,
+      unitsTimedOut: 0,
       backoff: 1,
       benched: 0,
     },
@@ -222,24 +234,50 @@ async function run(
         }
         extraction.progress.currentTerm = unit.term;
 
-        const result = await scrape({
-          query: unit.term,
-          region: boxes[unit.boxIndex]!.box,
-          language: extraction.request.language ?? 'en',
-          concurrency: perScrapeConcurrency,
-          egress,
-          signal: controller.signal,
-        }, (p) => {
-          extraction.progress.cellsSearched = cellsTotal + p.cellsSearched;
-        });
-        cellsTotal = extraction.progress.cellsSearched;
+        // Stall watchdog: abandon this unit only if it goes quiet — no new cell
+        // searched — for UNIT_STALL_MS. A slow-but-advancing metro box keeps
+        // running; a hung one (a request that never returns) is cut loose so it
+        // can't freeze the region and the campaign behind it. The timer resets
+        // on every progress tick.
+        const unitAbort = new AbortController();
+        const onMainAbort = () => unitAbort.abort();
+        controller.signal.addEventListener('abort', onMainAbort, { once: true });
+        let watchdog = setTimeout(() => unitAbort.abort(), UNIT_STALL_MS);
 
-        // Persist this box's places; count only genuinely new ones.
-        const { inserted } = db.upsertMany(result.places);
-        extraction.progress.newThisRun += inserted;
-        extraction.progress.placesInDb = db.count;
+        let placeCount = 0;
+        try {
+          const result = await scrape({
+            query: unit.term,
+            region: boxes[unit.boxIndex]!.box,
+            language: extraction.request.language ?? 'en',
+            concurrency: perScrapeConcurrency,
+            egress,
+            signal: unitAbort.signal,
+          }, (p) => {
+            extraction.progress.cellsSearched = cellsTotal + p.cellsSearched;
+            // Progress: the unit is alive, so restart its stall clock.
+            clearTimeout(watchdog);
+            watchdog = setTimeout(() => unitAbort.abort(), UNIT_STALL_MS);
+          });
+          cellsTotal = extraction.progress.cellsSearched;
 
-        db.markUnitDone(key, result.places.length);
+          // Persist this box's places; count only genuinely new ones.
+          const { inserted } = db.upsertMany(result.places);
+          extraction.progress.newThisRun += inserted;
+          extraction.progress.placesInDb = db.count;
+          placeCount = result.places.length;
+        } catch (error) {
+          // A whole-run cancellation propagates and ends the worker. A stalled
+          // unit does not — skip just this one and keep the region moving.
+          if (controller.signal.aborted) throw error;
+          extraction.progress.unitsTimedOut += 1;
+          cellsTotal = extraction.progress.cellsSearched;
+        } finally {
+          clearTimeout(watchdog);
+          controller.signal.removeEventListener('abort', onMainAbort);
+        }
+
+        db.markUnitDone(key, placeCount);
         extraction.progress.unitsDone += 1;
         extraction.progress.termsDone = maxTermDone();
         extraction.progress.backoff = egress.backoff;

@@ -1110,7 +1110,8 @@ function renderActivity() {
     return;
   }
   const p = x.progress;
-  const pct = p.unitsTotal ? Math.round(100 * p.unitsDone / p.unitsTotal) : 0;
+  // Floor, never round: 9626/9656 is 99%, not a finished-looking 100%.
+  const pct = p.unitsTotal ? Math.floor(100 * p.unitsDone / p.unitsTotal) : 0;
   const samples = rateSamples.get(x.id) ?? [];
   let rate = '', eta = '';
   if (samples.length >= 2) {
@@ -1124,7 +1125,7 @@ function renderActivity() {
       eta = ` · ~${minsLeft >= 90 ? (minsLeft / 60).toFixed(1) + ' h' : minsLeft + ' min'} left`;
     }
   }
-  const warn = `${p.benched > 20 ? ` · ${p.benched} IPs resting` : ''}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}`;
+  const warn = `${p.benched > 20 ? ` · ${p.benched} IPs resting` : ''}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}${p.unitsTimedOut ? ` · ${p.unitsTimedOut} skipped (retry next cycle)` : ''}`;
   host.innerHTML = `<h4>Now running</h4>
     <div style="font-weight:600;font-size:13px">${esc(x.request.vertical)} — ${esc(x.request.location.region)}
       <span class="meta" style="font-weight:400">pass ${p.pass}</span></div>
