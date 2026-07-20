@@ -42,6 +42,52 @@ let stopped = false;
 
 export const getCoverageRun = (): CoverageRun | null => active;
 
+/** The settings key holding the in-flight campaign, so a reboot can resume it. */
+const CAMPAIGN_KEY = 'activeCampaign';
+
+function persistCampaign(vertical: string, language: string): void {
+  const db = openDatabase();
+  try {
+    db.setSetting(CAMPAIGN_KEY, JSON.stringify({ vertical, language }));
+  } finally {
+    db.close();
+  }
+}
+
+function clearCampaign(): void {
+  const db = openDatabase();
+  try {
+    db.deleteSetting(CAMPAIGN_KEY);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * If a campaign was running when the app last died — a reboot, an update, a
+ * power cut — pick it up again without anyone having to notice or click.
+ * Explicit stops and completed sweeps clear the record, so only genuine
+ * interruptions resume.
+ */
+export function resumeCampaignIfAny(
+  onExtraction: (e: Extraction) => void,
+  onUpdate: (run: CoverageRun) => void,
+): CoverageRun | null {
+  if (active?.status === 'running') return active;
+  const db = openDatabase();
+  let saved: { vertical: string; language: string } | null = null;
+  try {
+    const raw = db.getSetting(CAMPAIGN_KEY);
+    if (raw) saved = JSON.parse(raw) as { vertical: string; language: string };
+  } catch {
+    saved = null;
+  } finally {
+    db.close();
+  }
+  if (!saved?.vertical) return null;
+  return startCoverage(saved.vertical, saved.language ?? 'en', onExtraction, onUpdate);
+}
+
 /** Every region we aim to cover, in stable country-then-list order. */
 export function allRegions(): { country: string; region: string }[] {
   const out: { country: string; region: string }[] = [];
@@ -80,6 +126,7 @@ export function startCoverage(
   };
   active = run;
   stopped = false;
+  persistCampaign(vertical, language);
   void execute(run, onExtraction, onUpdate);
   return run;
 }
@@ -130,5 +177,8 @@ async function execute(
   run.finishedAt = Date.now();
   run.current = undefined;
   run.currentExtractionId = undefined;
+  // A finished sweep or a deliberate stop is a settled state — don't resurrect
+  // it at next boot. Only a crash leaves the campaign record behind.
+  clearCampaign();
   publish();
 }

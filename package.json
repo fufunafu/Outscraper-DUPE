@@ -12,7 +12,8 @@
   "scripts": {
     "start": "node --experimental-strip-types --no-warnings apps/desktop/src/main.ts",
     "test": "node --experimental-strip-types --test packages/engine/src/**/*.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "package": "bash apps/desktop/package-app.sh"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

@@ -129,6 +129,13 @@ export class PlaceDatabase {
       );
     `);
 
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+
     // Added after v1 shipped; SQLite has no ADD COLUMN IF NOT EXISTS, so probe.
     const existing = this.#db.prepare('PRAGMA table_info(places)').all() as { name: string }[];
     if (!existing.some((c) => c.name === 'email_checked_at')) {
@@ -433,6 +440,34 @@ export class PlaceDatabase {
     return this.#db
       .prepare('SELECT pass, completed_at, new_places FROM passes WHERE region = ? AND vertical = ? ORDER BY pass DESC')
       .all(region, vertical) as { pass: number; completed_at: number | null; new_places: number }[];
+  }
+
+  // --- Settings ------------------------------------------------------------------
+
+  /** Durable app state that must survive a restart, e.g. the active campaign. */
+  getSetting(key: string): string | null {
+    const row = this.#db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.#db
+      .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
+  }
+
+  deleteSetting(key: string): void {
+    this.#db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+  }
+
+  /**
+   * Write a consistent snapshot of the whole database to `path`. VACUUM INTO
+   * reads a stable snapshot, so it is safe while scrapes are writing.
+   */
+  backupTo(path: string): void {
+    this.#db.exec(`VACUUM INTO '${path.replace(/'/g, "''")}'`);
   }
 
   close(): void {

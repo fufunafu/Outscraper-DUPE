@@ -28,7 +28,10 @@ import {
   type EnrichmentState,
 } from './enrichment.ts';
 import { livePools, startProxyCheck, getProxyCheck, type ProxyCheck } from './health.ts';
-import { startCoverage, cancelCoverage, getCoverageRun, type CoverageRun } from './coverage.ts';
+import {
+  startCoverage, cancelCoverage, getCoverageRun, resumeCampaignIfAny, type CoverageRun,
+} from './coverage.ts';
+import { startBackups, getBackupInfo } from './backup.ts';
 import type { PlaceQuery } from '../../../packages/engine/src/store/database.ts';
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'ui');
@@ -198,8 +201,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return json(res, 200, {
         count: db.count,
         contact: db.contactStats(),
-        categories: db.facet('category').slice(0, 60),
-        cities: db.facet('city').slice(0, 60),
+        // Return every distinct value: the UI's Category/City fields are
+        // searchable comboboxes, so a top-N cap would silently hide the long
+        // tail (e.g. "Railing contractor", ranked ~95th) that a user can type.
+        categories: db.facet('category'),
+        cities: db.facet('city'),
         states: db.facet('state'),
       });
     } finally {
@@ -286,7 +292,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   // --- Proxy health ---
   if (req.method === 'GET' && url.pathname === '/api/health') {
     const { count, source } = await loadProxies();
-    return json(res, 200, { proxies: count, source, pools: livePools(), check: getProxyCheck() });
+    return json(res, 200, {
+      proxies: count, source, pools: livePools(), check: getProxyCheck(), backup: getBackupInfo(),
+    });
+  }
+
+  // Lets the double-clickable app offer a real Quit; harmless from a browser.
+  if (req.method === 'POST' && url.pathname === '/api/shutdown') {
+    json(res, 200, { ok: true });
+    setTimeout(() => process.exit(0), 300);
+    return;
   }
 
   if (req.method === 'POST' && url.pathname === '/api/health/check') {
@@ -406,6 +421,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 export function startServer(port = 4317): Promise<string> {
   // The email finder lives for as long as the app does — no button, no opt-in.
   startAutoEnrichment(broadcastEnrichment);
+  // Dated snapshots of the database: shortly after boot, then daily.
+  startBackups();
+  // A campaign interrupted by a crash or reboot continues by itself. Delayed a
+  // few seconds so the server is reachable before heavy work spins up.
+  setTimeout(() => resumeCampaignIfAny(broadcastExtraction, broadcastCoverage), 5_000).unref();
 
   const server = createServer((req, res) => {
     handle(req, res).catch((error) => {

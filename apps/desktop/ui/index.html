@@ -50,6 +50,10 @@
   .pop { position:absolute; z-index:40; background:var(--card); border:1px solid var(--line);
     border-radius:var(--radius); box-shadow:var(--shadow); max-height:340px; overflow:auto; min-width:280px; }
   .pop[hidden] { display:none; }
+  .combo { position:relative; }
+  .combo input { padding-right:34px; text-overflow:ellipsis; }
+  .combo-caret { position:absolute; right:6px; top:50%; transform:translateY(-50%); border:0;
+    background:transparent; color:var(--muted); cursor:pointer; font-size:12px; line-height:1; padding:6px; }
   .opt { padding:9px 12px; cursor:pointer; font-size:14px; display:flex; align-items:center; gap:9px; }
   .opt:hover, .opt[aria-selected=true] { background:var(--chip); }
   .opt .why { margin-left:auto; font-size:11px; color:var(--muted); }
@@ -114,9 +118,15 @@
   .rchip.p2 { background:color-mix(in srgb,var(--ok) 22%,transparent); color:var(--ok); }
   .rchip.run { background:var(--accent); color:var(--on-accent); animation:pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity:.55; } }
-  .covrow { border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:12px; }
-  .covrow .bar { margin:10px 0 6px; }
-  #map { height:540px; border-radius:8px; border:1px solid var(--line); }
+  .covrow { padding:10px 0 2px; }
+  .covrow + .covrow { border-top:1px solid var(--line); }
+  .covrow .bar { margin:8px 0 6px; }
+  .ovgrid { display:grid; grid-template-columns:1fr 340px; gap:18px; align-items:start; }
+  @media (max-width:900px) { .ovgrid { grid-template-columns:1fr; } }
+  .ovside { display:flex; flex-direction:column; gap:12px; }
+  .ovblock { border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .ovblock h4 { margin:0 0 8px; font-size:13px; }
+  #map { height:520px; border-radius:8px; border:1px solid var(--line); }
   .leaflet-popup-content { font:13px/1.45 -apple-system,BlinkMacSystemFont,system-ui,sans-serif; }
   .leaflet-popup-content b { font-size:14px; }
 </style>
@@ -213,53 +223,49 @@
 
   <div id="tab-database" hidden>
     <div class="card">
-      <h1 style="font-size:17px"><span class="dot">◎</span> Coverage — Canada + USA</h1>
-      <p class="sub">The goal: every province and state covered, for each vertical. Auto-build works through all 64 regions for you, least-covered first, one at a time. Stop whenever — every finished area is saved, and it resumes exactly where it left off.</p>
+      <h1><span class="dot">▦</span> Your database <span id="dbCount" class="status" style="margin-left:8px"></span></h1>
+      <p class="sub">Every business found so far, live on the map. The filters below narrow both the map and the table.</p>
       <div id="coverageError"></div>
-      <div id="coverageBoard"><p class="empty">Loading coverage…</p></div>
-    </div>
-
-    <div class="card">
-      <h1><span class="dot">▦</span> Build your database</h1>
-      <p class="sub">Sweep an entire vertical across a province, once. Every business lands in a local database you can query instantly, forever — no re-scraping.</p>
-      <div id="extractError"></div>
-      <div class="row" style="grid-template-columns:1fr 170px 1fr; gap:12px; align-items:end">
-        <div class="field" style="margin:0">
-          <label for="vertical">Vertical</label>
-          <select id="vertical"></select>
+      <div class="ovgrid">
+        <div>
+          <div id="map"></div>
+          <p class="hint" id="mapHint"></p>
         </div>
-        <div class="field" style="margin:0">
-          <label for="extractCountry">Country</label>
-          <select id="extractCountry"></select>
-        </div>
-        <div class="field" style="margin:0">
-          <label for="extractRegion">Province / State</label>
-          <select id="extractRegion"></select>
+        <div class="ovside">
+          <div class="ovblock" id="ovActivity"><h4>Now running</h4><p class="hint" style="margin:0">Nothing running.</p></div>
+          <div class="ovblock">
+            <h4>Coverage — Canada + USA</h4>
+            <div id="coverageBoard"><p class="hint" style="margin:0">Loading…</p></div>
+          </div>
+          <div class="ovblock">
+            <h4>Email finder <span id="enrichBadge" class="status" style="margin-left:4px"></span></h4>
+            <div id="enrichStatus"></div>
+            <div class="actions" style="margin-top:8px"><button class="ghost" id="enrichPauseBtn">Pause</button></div>
+            <p class="hint" style="margin:8px 0 0">Automatic: every found business's website is checked for an email. No website, no email to find.</p>
+          </div>
         </div>
       </div>
-      <p class="hint" id="extractEstimate" style="margin-top:12px"></p>
-      <div style="margin-top:18px"><button class="primary" id="buildBtn">Build database</button></div>
-      <div id="extractions" style="margin-top:18px"></div>
     </div>
 
     <div class="card">
-      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">@</span> Email finder <span id="enrichBadge" class="status" style="margin-left:8px"></span></h1>
-      <p class="sub">Runs by itself. Emails aren't on Google Maps — they're on each business's website — so every place the scraper finds gets its site visited automatically, and the email lands in your database without you doing anything. Places with no website have no email to find.</p>
-      <div id="enrichStatus"></div>
-      <div class="actions" style="margin-top:6px"><button class="ghost" id="enrichPauseBtn">Pause</button></div>
-    </div>
-
-    <div class="card">
-      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">⌕</span> Query the database <span id="dbCount" class="status" style="margin-left:8px"></span></h1>
+      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">⌕</span> Search &amp; export</h1>
       <p class="sub">Filter what you've collected. Instant, offline, free — no scraping.</p>
       <div class="row" style="grid-template-columns:1fr 1fr; gap:12px">
         <div class="field" style="margin-bottom:12px">
           <label for="qCategory">Category</label>
-          <select id="qCategory"><option value="">Any category</option></select>
+          <div class="combo">
+            <input type="text" id="qCategory" placeholder="Any category — type to search" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qCategoryPop" aria-autocomplete="list">
+            <button type="button" class="combo-caret" data-for="qCategory" aria-label="Toggle category list">▾</button>
+          </div>
+          <div class="pop" id="qCategoryPop" role="listbox" hidden></div>
         </div>
         <div class="field" style="margin-bottom:12px">
           <label for="qCity">City</label>
-          <select id="qCity"><option value="">Any city</option></select>
+          <div class="combo">
+            <input type="text" id="qCity" placeholder="Any city — type to search" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qCityPop" aria-autocomplete="list">
+            <button type="button" class="combo-caret" data-for="qCity" aria-label="Toggle city list">▾</button>
+          </div>
+          <div class="pop" id="qCityPop" role="listbox" hidden></div>
         </div>
       </div>
       <div class="chips" style="margin-bottom:12px">
@@ -274,12 +280,34 @@
       </div>
       <div class="actions" style="margin-top:16px">
         <button class="primary" id="queryBtn">Search</button>
-        <button class="ghost" id="viewTableBtn" aria-pressed="true" style="border-color:var(--accent);color:var(--accent)">Table</button>
-        <button class="ghost" id="viewMapBtn" aria-pressed="false">Map</button>
         <button class="ghost" id="exportBtn">Export all matches to CSV</button>
       </div>
       <div id="queryResults"></div>
-      <div id="mapWrap" hidden style="margin-top:14px"><div id="map"></div><p class="hint" id="mapHint"></p></div>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>Build one region manually</summary>
+        <p class="sub" style="margin-top:10px">Auto-build (above, under Coverage) handles full coverage by itself; this is for sweeping a single province or state on demand.</p>
+        <div id="extractError"></div>
+        <div class="row" style="grid-template-columns:1fr 170px 1fr; gap:12px; align-items:end">
+          <div class="field" style="margin:0">
+            <label for="vertical">Vertical</label>
+            <select id="vertical"></select>
+          </div>
+          <div class="field" style="margin:0">
+            <label for="extractCountry">Country</label>
+            <select id="extractCountry"></select>
+          </div>
+          <div class="field" style="margin:0">
+            <label for="extractRegion">Province / State</label>
+            <select id="extractRegion"></select>
+          </div>
+        </div>
+        <p class="hint" id="extractEstimate" style="margin-top:12px"></p>
+        <div style="margin-top:18px"><button class="primary" id="buildBtn">Build this region</button></div>
+      </details>
+      <div id="extractions" style="margin-top:14px"></div>
     </div>
   </div><!-- /tab-database -->
 
@@ -295,6 +323,10 @@
       <div id="healthResults"></div>
     </div>
   </div><!-- /tab-health -->
+
+  <p style="text-align:center;margin-top:8px">
+    <button class="ghost" id="quitBtn" style="font-size:12px;color:var(--muted)">Quit app</button>
+  </p>
 </div>
 
 <script type="module">
@@ -570,7 +602,10 @@ const fmt = (ms) => { const s = Math.round(ms/1000); if (s<60) return `${s}s`; c
 
 function render() {
   const all = [...jobs.values()].sort((a,b) => b.startedAt - a.startedAt);
-  if (!all.length) return;
+  if (!all.length) {
+    $('jobs').innerHTML = '<p class="empty">No runs yet. Results are saved to <code>Documents/Places Scraper</code>.</p>';
+    return;
+  }
   $('jobs').innerHTML = all.map((j) => {
     const running = j.status === 'running' || j.status === 'starting';
     const p = j.progress;
@@ -655,15 +690,25 @@ $('tabScrapeBtn').onclick = () => switchTab('scrape');
 $('tabDbBtn').onclick = () => switchTab('database');
 $('tabHealthBtn').onclick = () => switchTab('health');
 let currentTab = 'scrape';
-function switchTab(which) {
+// A tab click updates the URL hash (#scrape/#database/#health) so each tab is
+// linkable and browser back/forward moves between them. syncHash=false when the
+// call is *reacting* to a hash change, to avoid rewriting the URL twice.
+function switchTab(which, syncHash = true) {
+  if (!TABS[which]) which = 'scrape';
   currentTab = which;
+  if (syncHash && location.hash.slice(1) !== which) location.hash = which;
   for (const [name, btnId] of Object.entries(TABS)) {
     $(`tab-${name}`).hidden = name !== which;
     $(btnId).setAttribute('aria-selected', String(name === which));
   }
-  if (which === 'database') { refreshDbStats(); refreshCoverage(); }
+  if (which === 'database') {
+    refreshDbStats(); refreshCoverage(); renderActivity(); runMapQuery();
+    // The map may have been created while its tab was hidden; re-measure.
+    if (map) setTimeout(() => map.invalidateSize(), 60);
+  }
   if (which === 'health') refreshHealth();
 }
+window.addEventListener('hashchange', () => switchTab(location.hash.slice(1), false));
 
 // Vertical + region pickers
 const VERTICALS = await (await fetch('/api/verticals')).json();
@@ -738,6 +783,81 @@ $('extractions').onclick = (ev) => {
 };
 
 // ---- Query the database ----
+
+// Searchable single-select combobox over a fixed {value, count} list, sorted
+// alphabetically. Type to filter; empty selection means "Any". buildQuery reads
+// the confirmed value via .value(); a half-typed string that matches nothing is
+// discarded on close so it never leaks into the query.
+function makeCombo({ inputId, popId, anyLabel }) {
+  const input = $(inputId), pop = $(popId);
+  let all = [];         // [{value, count}] sorted A→Z
+  let shown = [];       // currently visible subset
+  let active = 0;
+  let selected = '';    // confirmed selection ('' = Any)
+
+  function open() {
+    const q = input.value.trim().toLowerCase();
+    shown = q ? all.filter(o => o.value.toLowerCase().includes(q)) : all;
+    active = 0;
+    pop.innerHTML = shown.length
+      ? shown.map((o, i) =>
+          `<div class="opt" role="option" data-i="${i}" aria-selected="${i===0}">${esc(o.value)} <span class="why">${o.count.toLocaleString()}</span></div>`).join('')
+      : `<div class="opt head">No matches</div>`;
+    position(pop, input);
+    pop.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+  }
+  function close() {
+    pop.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    // Snap the text back to the confirmed selection so stray typing is ignored.
+    input.value = selected;
+  }
+  function pick(val) {
+    selected = val || '';
+    input.value = selected;
+    pop.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+  }
+
+  input.onfocus = () => { input.select(); open(); };
+  input.oninput = open;
+  input.onkeydown = (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (pop.hidden) { open(); return; }
+      if (!shown.length) return;
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length;
+      [...pop.querySelectorAll('.opt[data-i]')].forEach((o, i) => o.setAttribute('aria-selected', String(i === active)));
+      pop.querySelector(`.opt[data-i="${active}"]`)?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (!pop.hidden && shown[active]) pick(shown[active].value);
+    } else if (e.key === 'Escape') {
+      close(); input.blur();
+    }
+  };
+  pop.onclick = (e) => { const o = e.target.closest('.opt[data-i]'); if (o) pick(shown[+o.dataset.i].value); };
+  // Caret toggles the list. Use mousedown so we beat the input's focus/blur race.
+  document.querySelector(`[data-for="${inputId}"]`).onmousedown = (e) => {
+    e.preventDefault();
+    if (pop.hidden) { input.focus(); open(); } else { close(); }
+  };
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest(`#${inputId}, #${popId}, [data-for="${inputId}"]`)) close();
+  });
+
+  return {
+    value: () => selected,
+    setData(items) {
+      all = (items || []).slice().sort((a, b) => a.value.localeCompare(b.value));
+      input.placeholder = anyLabel;
+    },
+  };
+}
+const catCombo = makeCombo({ inputId: 'qCategory', popId: 'qCategoryPop', anyLabel: 'Any category — type to search' });
+const cityCombo = makeCombo({ inputId: 'qCity', popId: 'qCityPop', anyLabel: 'Any city — type to search' });
+
 const qFilters = new Set();
 document.querySelector('#tab-database .chips').onclick = (e) => {
   const chip = e.target.closest('.chip'); if (!chip) return;
@@ -750,14 +870,14 @@ async function refreshDbStats() {
   const s = await (await fetch('/api/database/stats')).json();
   $('dbCount').textContent = `${s.count.toLocaleString()} places`;
   if (s.contact) renderEnrichIdle(s.contact);
-  $('qCategory').innerHTML = '<option value="">Any category</option>' + s.categories.map(c => `<option value="${esc(c.value)}">${esc(c.value)} (${c.count})</option>`).join('');
-  $('qCity').innerHTML = '<option value="">Any city</option>' + s.cities.map(c => `<option value="${esc(c.value)}">${esc(c.value)} (${c.count})</option>`).join('');
+  catCombo.setData(s.categories);
+  cityCombo.setData(s.cities);
 }
 
 function buildQuery() {
   const f = {};
-  if ($('qCategory').value) f.category = $('qCategory').value;
-  if ($('qCity').value) f.city = $('qCity').value;
+  if (catCombo.value()) f.category = catCombo.value();
+  if (cityCombo.value()) f.city = cityCombo.value();
   for (const k of qFilters) f[k] = true;
   const mr = Number($('qMinRating').value); if (mr>0) f.minRating = mr;
   const mv = Number($('qMinReviews').value); if (mv>0) f.minReviews = mv;
@@ -766,23 +886,7 @@ function buildQuery() {
 }
 
 /* ---- Table & map views of query results ---- */
-let dbView = 'table';
 let map = null, mapLayer = null;
-
-function setDbView(which) {
-  dbView = which;
-  $('queryResults').hidden = which !== 'table';
-  $('mapWrap').hidden = which !== 'map';
-  for (const [id, v] of [['viewTableBtn','table'],['viewMapBtn','map']]) {
-    const on = v === which;
-    $(id).setAttribute('aria-pressed', String(on));
-    $(id).style.borderColor = on ? 'var(--accent)' : '';
-    $(id).style.color = on ? 'var(--accent)' : '';
-  }
-  if (which === 'map') runMapQuery();
-}
-$('viewTableBtn').onclick = () => setDbView('table');
-$('viewMapBtn').onclick = () => setDbView('map');
 
 async function runTableQuery() {
   const { places, count } = await (await fetch('/api/database/query', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
@@ -825,12 +929,13 @@ async function runMapQuery() {
     : `${points.length.toLocaleString()} places on the map. Click a pin for details.`;
 }
 
-$('queryBtn').onclick = () => { dbView === 'map' ? runMapQuery() : runTableQuery(); };
+// The map and the table are two views of the same filter; keep them in step.
+$('queryBtn').onclick = () => { runTableQuery(); runMapQuery(); };
 
 $('exportBtn').onclick = async () => {
   $('exportBtn').disabled = true; $('exportBtn').textContent = 'Exporting…';
   try {
-    const label = [$('vertical').value, $('extractRegion').value, $('qCategory').value].filter(Boolean).join('-') || 'places';
+    const label = [$('vertical').value, $('extractRegion').value, catCombo.value()].filter(Boolean).join('-') || 'places';
     const { path, rows } = await (await fetch('/api/database/export', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
     await fetch('/api/reveal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
     $('exportBtn').textContent = `Exported ${rows.toLocaleString()} rows ✓`;
@@ -855,26 +960,64 @@ function renderCoverage(data) {
   $('coverageBoard').innerHTML = data.verticals.map(v => {
     const pct = v.total ? Math.round(100 * v.covered / v.total) : 0;
     const mine = autoActive && autoRun.vertical === v.name;
-    const deepest = Math.max(0, ...v.regions.map(r => r.passes));
     return `<div class="covrow">
-      <div class="head">
-        <div><h3 style="margin:0;font-size:15px">${v.name[0].toUpperCase()+v.name.slice(1)}</h3>
-          <div class="meta"><b>${v.covered}</b> of ${v.total} regions covered${deepest > 1 ? ` · deepest ${deepest} passes` : ''}</div></div>
+      <div class="head" style="align-items:center">
+        <div style="font-weight:600;font-size:13px">${v.name[0].toUpperCase()+v.name.slice(1)}
+          <span class="meta" style="font-weight:400">${v.covered}/${v.total} regions</span></div>
         ${mine
-          ? `<button class="ghost" data-covstop="1">Stop auto-build</button>`
-          : `<button class="ghost" data-covrun="${v.name}" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build all ${v.total}</button>`}
+          ? `<button class="ghost" data-covstop="1" style="padding:4px 10px;font-size:12px">Stop</button>`
+          : `<button class="ghost" data-covrun="${v.name}" style="padding:4px 10px;font-size:12px" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build</button>`}
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
-      ${mine ? `<div class="meta" style="margin-bottom:6px">Auto-build running — now on <b>${esc(autoRun.current ? autoRun.current.country + '-' + autoRun.current.region : '…')}</b>, ${autoRun.regionsDone}/${autoRun.regionsTotal} regions this cycle${autoRun.failures ? `, ${autoRun.failures} failed` : ''}.</div>` : ''}
-      <details><summary style="font-size:12.5px;color:var(--muted)">Region detail</summary>
+      ${mine ? `<div class="meta" style="margin-bottom:4px">Now on <b>${esc(autoRun.current ? autoRun.current.country + '-' + autoRun.current.region : '…')}</b> · ${autoRun.regionsDone}/${autoRun.regionsTotal} this cycle${autoRun.failures ? ` · ${autoRun.failures} failed` : ''}</div>` : ''}
+      <details><summary style="font-size:12px;color:var(--muted)">Region detail</summary>
         <div class="regiongrid">${v.regions.map(r =>
           `<span class="rchip ${r.running ? 'run' : r.passes >= 2 ? 'p2' : r.passes === 1 ? 'p1' : ''}"
              title="${esc(r.name)} — ${r.running ? 'building now' : r.passes + ' pass' + (r.passes === 1 ? '' : 'es')}">${r.code}${r.passes ? '·' + r.passes : ''}</span>`).join('')}
         </div>
-        <p class="hint">Grey = not started · blue = 1 pass · green = 2+ passes (each pass catches businesses the last one missed).</p>
+        <p class="hint">Grey = not started · blue = 1 pass · green = 2+ (each pass adds what the last missed).</p>
       </details>
     </div>`;
   }).join('');
+}
+
+/* ---- Live activity: current extraction with measured rate and ETA ---- */
+const rateSamples = new Map(); // extraction id -> [{t, units}]
+
+function noteActivitySample(x) {
+  if (x.status !== 'running') { rateSamples.delete(x.id); return; }
+  const samples = rateSamples.get(x.id) ?? [];
+  samples.push({ t: Date.now(), units: x.progress.unitsDone });
+  // Keep a sliding 3-minute window; enough to smooth bursts, fresh enough to react.
+  while (samples.length > 2 && samples[0].t < Date.now() - 180_000) samples.shift();
+  rateSamples.set(x.id, samples);
+}
+
+function renderActivity() {
+  const x = [...extractions.values()].find(e => e.status === 'running' || e.status === 'starting');
+  const host = $('ovActivity');
+  if (!x) {
+    host.innerHTML = `<h4>Now running</h4><p class="hint" style="margin:0">Nothing running. Coverage auto-build below starts (or resumes) a full sweep.</p>`;
+    return;
+  }
+  const p = x.progress;
+  const pct = p.unitsTotal ? Math.round(100 * p.unitsDone / p.unitsTotal) : 0;
+  const samples = rateSamples.get(x.id) ?? [];
+  let eta = '';
+  if (samples.length >= 2) {
+    const first = samples[0], last = samples[samples.length - 1];
+    const perMin = (last.units - first.units) / Math.max(0.5, (last.t - first.t) / 60_000);
+    if (perMin > 1) {
+      const minsLeft = Math.round((p.unitsTotal - p.unitsDone) / perMin);
+      eta = ` · ${Math.round(perMin)} units/min · ~${minsLeft >= 90 ? (minsLeft / 60).toFixed(1) + ' h' : minsLeft + ' min'} left`;
+    }
+  }
+  host.innerHTML = `<h4>Now running</h4>
+    <div style="font-weight:600;font-size:13px">${esc(x.request.vertical)} — ${esc(x.request.location.region)}
+      <span class="meta" style="font-weight:400">pass ${p.pass}${p.resuming ? ' (resumed)' : ''}</span></div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="meta">${p.unitsDone.toLocaleString()}/${p.unitsTotal.toLocaleString()} units${eta}</div>
+    <div class="meta" style="margin-top:2px"><b>${p.placesInDb.toLocaleString()}</b> in database · <b>${p.newThisRun.toLocaleString()}</b> new this run${p.benched ? ` · ${p.benched} IPs resting` : ''}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}</div>`;
 }
 
 $('coverageBoard').onclick = async (e) => {
@@ -1007,20 +1150,39 @@ $('healthCheckBtn').onclick = async () => {
 // Live pool numbers move constantly during a run; refresh while watching.
 setInterval(() => { if (currentTab === 'health') refreshHealth(); }, 3000);
 
+/* ---- Quit (two-step so a stray click can't kill a running scrape) ---- */
+let quitArmed = false;
+$('quitBtn').onclick = async () => {
+  if (!quitArmed) {
+    quitArmed = true;
+    $('quitBtn').textContent = 'Scrapes stop (resumable) — click again to quit';
+    $('quitBtn').style.color = 'var(--err)';
+    setTimeout(() => { quitArmed = false; $('quitBtn').textContent = 'Quit app'; $('quitBtn').style.color = ''; }, 5000);
+    return;
+  }
+  await fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
+  document.body.innerHTML = '<div class="wrap"><div class="card"><h1>App stopped</h1><p class="sub">Everything is saved. Close this tab; double-click the app to start again — unfinished builds resume automatically.</p></div></div>';
+};
+
 const events = new EventSource('/api/events');
 events.onmessage = (e) => {
   const m = JSON.parse(e.data);
   if (m.type === 'hello') {
+    // A hello is the full authoritative state of the (possibly new) server.
+    // Without clearing first, a page that outlives a server restart keeps the
+    // dead server's runs on screen as "running" ghosts forever.
+    jobs.clear(); extractions.clear(); rateSamples.clear();
     for (const j of m.jobs) jobs.set(j.id, j);
     for (const x of (m.extractions ?? [])) extractions.set(x.id, x);
     if (m.enrichment) { enrichState = m.enrichment; renderEnrichment(); }
     if (m.coverage) autoRun = m.coverage;
-    render(); renderExtractions();
+    render(); renderExtractions(); renderActivity();
   }
   else if (m.type === 'job') { jobs.set(m.job.id, m.job); render(); }
   else if (m.type === 'extraction') {
     extractions.set(m.extraction.id, m.extraction);
-    renderExtractions();
+    noteActivitySample(m.extraction);
+    renderExtractions(); renderActivity();
     // A finished region changes the coverage picture; repaint the board.
     if (m.extraction.status !== 'running' && m.extraction.status !== 'starting') refreshCoverage();
   }
@@ -1032,6 +1194,11 @@ setInterval(() => {
   if ([...jobs.values()].some((j)=>j.status==='running'||j.status==='starting')) render();
   if ([...extractions.values()].some((x)=>x.status==='running'||x.status==='starting')) renderExtractions();
 }, 1000);
+
+// Honour a tab hash present on first load (e.g. a bookmarked #database). Done
+// last, once every const the database/health paths touch has initialized —
+// running it earlier hits the temporal dead zone for map/catCombo/enrichContact.
+if (TABS[location.hash.slice(1)]) switchTab(location.hash.slice(1), false);
 </script>
 </body>
 </html>

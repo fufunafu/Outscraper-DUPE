@@ -193,6 +193,35 @@ describe('PlaceDatabase', () => {
     }
   });
 
+  it('stores settings durably and snapshots via backupTo', () => {
+    const { db, path } = freshDb();
+    const backupPath = `${path}.backup`;
+    try {
+      assert.equal(db.getSetting('campaign'), null);
+      db.setSetting('campaign', '{"vertical":"construction"}');
+      db.setSetting('campaign', '{"vertical":"medical"}'); // upsert overwrites
+      assert.equal(db.getSetting('campaign'), '{"vertical":"medical"}');
+      db.deleteSetting('campaign');
+      assert.equal(db.getSetting('campaign'), null);
+
+      db.upsert(place({ cid: '7', name: 'Snapshot Me' }));
+      db.backupTo(backupPath);
+      const restored = new PlaceDatabase(backupPath);
+      try {
+        assert.equal(restored.count, 1, 'backup contains the data');
+      } finally {
+        restored.close();
+      }
+    } finally {
+      db.close();
+      for (const p of [path, backupPath]) {
+        rmSync(p, { force: true });
+        rmSync(`${p}-wal`, { force: true });
+        rmSync(`${p}-shm`, { force: true });
+      }
+    }
+  });
+
   it('facets return value counts for the query UI', () => {
     const { db, path } = freshDb();
     try {
