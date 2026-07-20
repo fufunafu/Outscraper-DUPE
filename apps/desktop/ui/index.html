@@ -973,6 +973,13 @@ async function runMapQuery() {
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19, attribution: '© OpenStreetMap contributors',
     }).addTo(map);
+    // Leaflet measures its container once, at creation. On first load that can
+    // happen before the flex layout settles, leaving tiles stuck in a corner
+    // until something forces a recalc. A ResizeObserver invalidates on every
+    // real size change — the initial 0→full sizing included — so the map is
+    // correct without depending on a guessed timeout. (invalidateSize doesn't
+    // change the observed element's own box, so this can't loop.)
+    new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById('map'));
   }
   if (mapLayer) map.removeLayer(mapLayer);
   // Clusters keep 30k pins readable zoomed out; up close, individual pins win.
