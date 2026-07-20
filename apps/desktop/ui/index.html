@@ -232,7 +232,6 @@
       <div class="ovgrid">
         <div>
           <div id="map"></div>
-          <div id="mapLegend" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:12px"></div>
           <p class="hint" id="mapHint"></p>
         </div>
         <div class="ovside">
@@ -1000,17 +999,9 @@ async function runMapQuery() {
   // the first reveal needs a size recalc or tiles render in a corner.
   setTimeout(() => map.invalidateSize(), 50);
 
-  // Legend: the top categories in view, each a one-click filter.
-  const counts = new Map();
-  for (const p of points) if (p.category) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
-  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
-  $('mapLegend').innerHTML = top.map(([cat, n]) =>
-    `<a href="#" data-catfilter="${esc(cat)}" style="display:inline-flex;align-items:center;gap:5px;color:var(--ink);text-decoration:none">
-      <i style="width:9px;height:9px;border-radius:50%;background:${catColor(cat)}"></i>${esc(cat)} <span class="meta">${n.toLocaleString()}</span></a>`).join('');
-
   $('mapHint').textContent = truncated
-    ? `Showing the ${points.length.toLocaleString()} most-reviewed of ${total.toLocaleString()} matches — narrow the filters to see the rest.`
-    : `${points.length.toLocaleString()} places on the map. Click a cluster to zoom, a pin for details, a legend entry to filter.`;
+    ? `${points.length.toLocaleString()} of ${total.toLocaleString()} shown`
+    : '';
 }
 
 // A category name anywhere (pin popup, legend) applies it as the filter.
