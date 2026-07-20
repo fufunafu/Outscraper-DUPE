@@ -890,9 +890,10 @@ let map = null, mapLayer = null;
 
 async function runTableQuery() {
   const { places, count } = await (await fetch('/api/database/query', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
-  const cols = ['name','category','city','phone','email_1','site','rating','reviews'];
+  const cols = ['name','category','city','full_address','phone','email_1','site','rating','reviews'];
+  const heading = (c) => c === 'email_1' ? 'email' : c === 'full_address' ? 'address' : c;
   $('queryResults').innerHTML = places.length ? `<div class="tablewrap"><table>
-    <thead><tr>${cols.map(c=>`<th>${c === 'email_1' ? 'email' : c}</th>`).join('')}</tr></thead>
+    <thead><tr>${cols.map(c=>`<th>${heading(c)}</th>`).join('')}</tr></thead>
     <tbody>${places.map(p=>`<tr>${cols.map(c=>`<td>${p[c]==null?'':esc(String(p[c])).slice(0,50)}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div><p class="hint">Showing ${places.length} matches (of ${count.toLocaleString()} in database). Export gets them all.</p>`
    : `<p class="empty">No matches. ${count?'':'Build a database first.'}</p>`;
