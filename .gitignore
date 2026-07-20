@@ -4,3 +4,4 @@ node_modules/
 *.xlsx
 out/
 .env*
+.DS_Store
