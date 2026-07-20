@@ -325,6 +325,15 @@
       </div>
       <div id="healthPools"></div>
       <div id="healthResults"></div>
+      <div style="border-top:1px solid var(--line);margin-top:18px;padding-top:16px">
+        <div class="head" style="align-items:center">
+          <div><b style="font-size:13px">Remote access</b>
+            <div class="meta" id="remoteMeta">Off — the dashboard is reachable only on this Mac.</div></div>
+          <button class="ghost" id="remoteBtn">Enable</button>
+        </div>
+        <p class="hint" style="margin-top:8px">Lets other devices open this dashboard through a private link with a key.
+          Use it on a network you trust — your home, office, or a Tailscale network — never on public Wi-Fi.</p>
+      </div>
     </div>
   </div><!-- /tab-health -->
 
@@ -853,6 +862,7 @@ function makeCombo({ inputId, popId, anyLabel }) {
 
   return {
     value: () => selected,
+    set: (val) => pick(val || ''),
     setData(items) {
       all = (items || []).slice().sort((a, b) => a.value.localeCompare(b.value));
       input.placeholder = anyLabel;
@@ -886,6 +896,7 @@ function buildQuery() {
   const mr = Number($('qMinRating').value); if (mr>0) f.minRating = mr;
   const mv = Number($('qMinReviews').value); if (mv>0) f.minReviews = mv;
   if ($('qSearch').value.trim()) f.search = $('qSearch').value.trim();
+  f.sort = qSort; f.dir = qDir;
   return f;
 }
 
@@ -950,6 +961,11 @@ $('queryResults').onclick = async (e) => {
   }
 };
 
+/* Category → colour: stable hash into a fixed palette, so the same trade is
+   the same colour on every load without anyone maintaining a mapping. */
+const CAT_PALETTE = ['#3b6fe0','#e0563b','#22a06b','#a05fd6','#e0a53b','#2aa3c9','#d64f8b','#7a8a3a','#8a6d4f','#5b6b7a'];
+const catColor = (name) => CAT_PALETTE[[...(name ?? '')].reduce((a, ch) => a + ch.charCodeAt(0), 0) % CAT_PALETTE.length];
+
 async function runMapQuery() {
   if (!window.L) { $('mapHint').textContent = 'Map library could not load — check your internet connection.'; return; }
   const { points, total, truncated } = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
@@ -958,28 +974,55 @@ async function runMapQuery() {
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19, attribution: '© OpenStreetMap contributors',
     }).addTo(map);
-    mapLayer = L.layerGroup().addTo(map);
   }
-  mapLayer.clearLayers();
+  if (mapLayer) map.removeLayer(mapLayer);
+  // Clusters keep 30k pins readable zoomed out; up close, individual pins win.
+  mapLayer = window.L.markerClusterGroup
+    ? L.markerClusterGroup({ chunkedLoading: true, maxClusterRadius: 46, disableClusteringAtZoom: 11 })
+    : L.layerGroup();
+
   const markers = [];
   for (const p of points) {
-    const m = L.circleMarker([p.lat, p.lng], { radius: 4, weight: 1, color: '#3b6fe0', fillColor: '#3b6fe0', fillOpacity: .65 });
-    m.bindPopup(`<b>${esc(p.name ?? '')}</b><br>${esc([p.category, p.city].filter(Boolean).join(' · '))}
+    const colour = catColor(p.category);
+    const m = L.circleMarker([p.lat, p.lng], { radius: 4, weight: 1, color: colour, fillColor: colour, fillOpacity: .7 });
+    m.bindPopup(`<b>${esc(p.name ?? '')}</b><br>
+      ${p.category ? `<a href="#" data-catfilter="${esc(p.category)}">${esc(p.category)}</a>` : ''}${p.city ? ` · ${esc(p.city)}` : ''}
       ${p.rating != null ? `<br>★ ${p.rating}${p.reviews != null ? ` (${Number(p.reviews).toLocaleString()} reviews)` : ''}` : ''}
       ${p.phone ? `<br>${esc(p.phone)}` : ''}
       ${p.email ? `<br><a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ''}
       ${p.site ? `<br><a href="${esc(p.site)}" target="_blank" rel="noopener">website</a>` : ''}`);
-    m.addTo(mapLayer);
     markers.push(m);
   }
+  if (mapLayer.addLayers) mapLayer.addLayers(markers); else markers.forEach((m) => m.addTo(mapLayer));
+  map.addLayer(mapLayer);
   if (markers.length) map.fitBounds(L.featureGroup(markers).getBounds().pad(0.08));
   // Leaflet measures its container when created; if that happened while hidden,
   // the first reveal needs a size recalc or tiles render in a corner.
   setTimeout(() => map.invalidateSize(), 50);
+
+  // Legend: the top categories in view, each a one-click filter.
+  const counts = new Map();
+  for (const p of points) if (p.category) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  $('mapLegend').innerHTML = top.map(([cat, n]) =>
+    `<a href="#" data-catfilter="${esc(cat)}" style="display:inline-flex;align-items:center;gap:5px;color:var(--ink);text-decoration:none">
+      <i style="width:9px;height:9px;border-radius:50%;background:${catColor(cat)}"></i>${esc(cat)} <span class="meta">${n.toLocaleString()}</span></a>`).join('');
+
   $('mapHint').textContent = truncated
     ? `Showing the ${points.length.toLocaleString()} most-reviewed of ${total.toLocaleString()} matches — narrow the filters to see the rest.`
-    : `${points.length.toLocaleString()} places on the map. Click a pin for details.`;
+    : `${points.length.toLocaleString()} places on the map. Click a cluster to zoom, a pin for details, a legend entry to filter.`;
 }
+
+// A category name anywhere (pin popup, legend) applies it as the filter.
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-catfilter]');
+  if (!link) return;
+  e.preventDefault();
+  catCombo.set(link.dataset.catfilter);
+  qOffset = 0;
+  runTableQuery();
+  runMapQuery();
+});
 
 // The map and the table are two views of the same filter; keep them in step.
 $('queryBtn').onclick = () => { qOffset = 0; runTableQuery(); runMapQuery(); };
@@ -1032,7 +1075,7 @@ function renderCoverage(data) {
           : `<button class="ghost" data-covrun="${v.name}" style="padding:4px 10px;font-size:12px" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build</button>`}
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
-      ${mine ? `<div class="meta" style="margin-bottom:4px">cycle ${autoRun.regionsDone}/${autoRun.regionsTotal}${autoRun.failures ? ` · ${autoRun.failures} failed` : ''}</div>` : ''}
+      ${mine ? `<div class="meta" style="margin-bottom:4px">pass cycle ${autoRun.cycle ?? 1} · region ${autoRun.regionsDone}/${autoRun.regionsTotal}${autoRun.failures ? ` · ${autoRun.failures} failed` : ''} · runs until stopped</div>` : ''}
       <details><summary style="font-size:12px;color:var(--muted)">Region detail</summary>
         <div class="regiongrid">${v.regions.map(r =>
           `<span class="rchip ${r.running ? 'run' : r.passes >= 2 ? 'p2' : r.passes === 1 ? 'p1' : ''}"
@@ -1109,6 +1152,14 @@ $('coverageBoard').onclick = async (e) => {
 /* ---- Email finder (automatic) ---- */
 let enrichState = null;
 let enrichContact = null;
+let enrichSamples = [];
+
+function noteEnrichSample(s) {
+  const last = enrichSamples[enrichSamples.length - 1];
+  if (last && s.checked < last.checked) enrichSamples = []; // app restarted
+  enrichSamples.push({ t: Date.now(), checked: s.checked });
+  while (enrichSamples.length > 2 && enrichSamples[0].t < Date.now() - 180_000) enrichSamples.shift();
+}
 
 function renderEnrichIdle(contact) {
   enrichContact = contact;
@@ -1125,10 +1176,19 @@ function renderEnrichment() {
   const total = s.checked + s.pending;
   const pct = total ? Math.round(100 * s.checked / total) : 100;
   const rate = s.checked ? Math.round(100 * s.found / s.checked) : 0;
+  let speed = '';
+  if (enrichSamples.length >= 2) {
+    const first = enrichSamples[0], last = enrichSamples[enrichSamples.length - 1];
+    const perMin = (last.checked - first.checked) / Math.max(0.5, (last.t - first.t) / 60_000);
+    if (perMin > 0.5) {
+      const minsLeft = Math.round(s.pending / perMin);
+      speed = ` · ${Math.round(perMin)}/min · ~${minsLeft >= 90 ? (minsLeft / 60).toFixed(1) + ' h' : minsLeft + ' min'} left`;
+    }
+  }
   $('enrichStatus').innerHTML = `
     ${s.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
-    <div class="meta"><b>${s.pending.toLocaleString()}</b> waiting · <b>${s.checked.toLocaleString()}</b> checked${s.checked ? ` · ${rate}% hit` : ''}</div>
-    ${enrichContact ? `<div class="meta" style="margin-top:2px"><b>${enrichContact.withEmail.toLocaleString()}</b> emails in database</div>` : ''}`;
+    <div class="meta"><b>${s.pending.toLocaleString()}</b> waiting${speed}</div>
+    <div class="meta" style="margin-top:2px"><b>${s.checked.toLocaleString()}</b> checked${s.checked ? ` · ${rate}% hit` : ''}${enrichContact ? ` · <b>${enrichContact.withEmail.toLocaleString()}</b> emails total` : ''}</div>`;
   $('enrichPauseBtn').textContent = s.status === 'paused' ? 'Resume' : 'Pause';
 }
 
@@ -1154,6 +1214,7 @@ function renderHealth(h) {
     ? `${h.proxies} proxies (${h.source})`
     : 'no proxies — direct connection';
   $('healthCheckBtn').disabled = healthCheck?.status === 'running' || !h.proxies;
+  if (h.remote) renderRemote(h.remote);
 
   // Live per-IP stats from active runs — the truest health signal there is.
   $('healthPools').innerHTML = (h.pools ?? []).map(pool => {
@@ -1213,6 +1274,20 @@ function renderHealthCheck() {
 
 const median = (xs) => { const s = [...xs].sort((a,b)=>a-b); return s.length ? s[Math.floor(s.length/2)] : 0; };
 
+/* ---- Remote access ---- */
+let remoteOn = false;
+function renderRemote(remote) {
+  remoteOn = !!remote?.enabled;
+  $('remoteBtn').textContent = remoteOn ? 'Disable' : 'Enable';
+  $('remoteMeta').innerHTML = remoteOn
+    ? `On — open <a href="${esc(remote.url)}" target="_blank" rel="noopener">${esc(remote.url)}</a> from another device (the link carries the key).`
+    : 'Off — the dashboard is reachable only on this Mac.';
+}
+$('remoteBtn').onclick = async () => {
+  const res = await (await fetch(`/api/remote/${remoteOn ? 'disable' : 'enable'}`, { method:'POST' })).json();
+  renderRemote(res.enabled ? res : { enabled: false });
+};
+
 $('healthCheckBtn').onclick = async () => {
   healthCheck = await (await fetch('/api/health/check', {method:'POST'})).json();
   renderHealthCheck();
@@ -1245,7 +1320,7 @@ events.onmessage = (e) => {
     jobs.clear(); extractions.clear(); rateSamples.clear();
     for (const j of m.jobs) jobs.set(j.id, j);
     for (const x of (m.extractions ?? [])) extractions.set(x.id, x);
-    if (m.enrichment) { enrichState = m.enrichment; renderEnrichment(); }
+    if (m.enrichment) { enrichState = m.enrichment; noteEnrichSample(m.enrichment); renderEnrichment(); }
     if (m.coverage) autoRun = m.coverage;
     render(); renderExtractions(); renderActivity();
   }
@@ -1257,7 +1332,7 @@ events.onmessage = (e) => {
     // A finished region changes the coverage picture; repaint the board.
     if (m.extraction.status !== 'running' && m.extraction.status !== 'starting') refreshCoverage();
   }
-  else if (m.type === 'enrichment') { enrichState = m.enrichment; renderEnrichment(); }
+  else if (m.type === 'enrichment') { enrichState = m.enrichment; noteEnrichSample(m.enrichment); renderEnrichment(); }
   else if (m.type === 'coverage') { autoRun = m.coverage; refreshCoverage(); }
   else if (m.type === 'health') { healthCheck = m.check; if (currentTab === 'health') renderHealthCheck(); }
 };
