@@ -240,8 +240,7 @@
           <div class="ovblock">
             <h4>Email finder <span id="enrichBadge" class="status" style="margin-left:4px"></span></h4>
             <div id="enrichStatus"></div>
-            <div class="actions" style="margin-top:8px"><button class="ghost" id="enrichPauseBtn">Pause</button></div>
-            <p class="hint" style="margin:8px 0 0">Automatic: every found business's website is checked for an email. No website, no email to find.</p>
+            <div class="actions" style="margin-top:8px"><button class="ghost" id="enrichPauseBtn" style="padding:4px 10px;font-size:12px">Pause</button></div>
           </div>
         </div>
       </div>
@@ -970,7 +969,7 @@ function renderCoverage(data) {
           : `<button class="ghost" data-covrun="${v.name}" style="padding:4px 10px;font-size:12px" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build</button>`}
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
-      ${mine ? `<div class="meta" style="margin-bottom:4px">Now on <b>${esc(autoRun.current ? autoRun.current.country + '-' + autoRun.current.region : '…')}</b> · ${autoRun.regionsDone}/${autoRun.regionsTotal} this cycle${autoRun.failures ? ` · ${autoRun.failures} failed` : ''}</div>` : ''}
+      ${mine ? `<div class="meta" style="margin-bottom:4px">cycle ${autoRun.regionsDone}/${autoRun.regionsTotal}${autoRun.failures ? ` · ${autoRun.failures} failed` : ''}</div>` : ''}
       <details><summary style="font-size:12px;color:var(--muted)">Region detail</summary>
         <div class="regiongrid">${v.regions.map(r =>
           `<span class="rchip ${r.running ? 'run' : r.passes >= 2 ? 'p2' : r.passes === 1 ? 'p1' : ''}"
@@ -983,13 +982,18 @@ function renderCoverage(data) {
 }
 
 /* ---- Live activity: current extraction with measured rate and ETA ---- */
-const rateSamples = new Map(); // extraction id -> [{t, units}]
+const rateSamples = new Map(); // extraction id -> [{t, units, places}]
 
 function noteActivitySample(x) {
   if (x.status !== 'running') { rateSamples.delete(x.id); return; }
   const samples = rateSamples.get(x.id) ?? [];
-  samples.push({ t: Date.now(), units: x.progress.unitsDone });
-  // Keep a sliding 3-minute window; enough to smooth bursts, fresh enough to react.
+  const last = samples[samples.length - 1];
+  // A resumed pass fast-forwards through already-done units in bursts; those
+  // would fake a monster rate ("13,782 units/min · ~0 min left"). A jump no
+  // real scrape produces resets the measurement window.
+  if (last && x.progress.unitsDone - last.units > 150) samples.length = 0;
+  samples.push({ t: Date.now(), units: x.progress.unitsDone, places: x.progress.placesInDb });
+  // Sliding 3-minute window: smooth enough to trust, fresh enough to react.
   while (samples.length > 2 && samples[0].t < Date.now() - 180_000) samples.shift();
   rateSamples.set(x.id, samples);
 }
@@ -998,27 +1002,31 @@ function renderActivity() {
   const x = [...extractions.values()].find(e => e.status === 'running' || e.status === 'starting');
   const host = $('ovActivity');
   if (!x) {
-    host.innerHTML = `<h4>Now running</h4><p class="hint" style="margin:0">Nothing running. Coverage auto-build below starts (or resumes) a full sweep.</p>`;
+    host.innerHTML = `<h4>Now running</h4><p class="hint" style="margin:0">Nothing running. Auto-build below starts (or resumes) a full sweep.</p>`;
     return;
   }
   const p = x.progress;
   const pct = p.unitsTotal ? Math.round(100 * p.unitsDone / p.unitsTotal) : 0;
   const samples = rateSamples.get(x.id) ?? [];
-  let eta = '';
+  let rate = '', eta = '';
   if (samples.length >= 2) {
     const first = samples[0], last = samples[samples.length - 1];
-    const perMin = (last.units - first.units) / Math.max(0.5, (last.t - first.t) / 60_000);
-    if (perMin > 1) {
-      const minsLeft = Math.round((p.unitsTotal - p.unitsDone) / perMin);
-      eta = ` · ${Math.round(perMin)} units/min · ~${minsLeft >= 90 ? (minsLeft / 60).toFixed(1) + ' h' : minsLeft + ' min'} left`;
+    const secs = Math.max(1, (last.t - first.t) / 1000);
+    const placesPerSec = (last.places - first.places) / secs;
+    if (placesPerSec > 0) rate = ` · ${placesPerSec >= 10 ? Math.round(placesPerSec) : placesPerSec.toFixed(1)} places/s`;
+    const unitsPerMin = (last.units - first.units) / (secs / 60);
+    if (unitsPerMin > 1) {
+      const minsLeft = Math.round((p.unitsTotal - p.unitsDone) / unitsPerMin);
+      eta = ` · ~${minsLeft >= 90 ? (minsLeft / 60).toFixed(1) + ' h' : minsLeft + ' min'} left`;
     }
   }
+  const warn = `${p.benched > 20 ? ` · ${p.benched} IPs resting` : ''}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}`;
   host.innerHTML = `<h4>Now running</h4>
     <div style="font-weight:600;font-size:13px">${esc(x.request.vertical)} — ${esc(x.request.location.region)}
-      <span class="meta" style="font-weight:400">pass ${p.pass}${p.resuming ? ' (resumed)' : ''}</span></div>
+      <span class="meta" style="font-weight:400">pass ${p.pass}</span></div>
     <div class="bar"><i style="width:${pct}%"></i></div>
-    <div class="meta">${p.unitsDone.toLocaleString()}/${p.unitsTotal.toLocaleString()} units${eta}</div>
-    <div class="meta" style="margin-top:2px"><b>${p.placesInDb.toLocaleString()}</b> in database · <b>${p.newThisRun.toLocaleString()}</b> new this run${p.benched ? ` · ${p.benched} IPs resting` : ''}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}</div>`;
+    <div class="meta">${pct}%${rate}${eta}</div>
+    <div class="meta" style="margin-top:2px"><b>${p.placesInDb.toLocaleString()}</b> total · <b>${p.newThisRun.toLocaleString()}</b> new this run${warn}</div>`;
 }
 
 $('coverageBoard').onclick = async (e) => {
@@ -1056,12 +1064,8 @@ function renderEnrichment() {
   const rate = s.checked ? Math.round(100 * s.found / s.checked) : 0;
   $('enrichStatus').innerHTML = `
     ${s.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
-    <div class="stats">
-      <span><b>${s.pending.toLocaleString()}</b> websites waiting</span>
-      <span><b>${s.checked.toLocaleString()}</b> checked since launch</span>
-      <span><b>${s.found.toLocaleString()}</b> emails found${s.checked ? ` (${rate}%)` : ''}</span>
-      ${enrichContact ? `<span><b>${enrichContact.withEmail.toLocaleString()}</b> emails in database</span>` : ''}
-    </div>`;
+    <div class="meta"><b>${s.pending.toLocaleString()}</b> waiting · <b>${s.checked.toLocaleString()}</b> checked${s.checked ? ` · ${rate}% hit` : ''}</div>
+    ${enrichContact ? `<div class="meta" style="margin-top:2px"><b>${enrichContact.withEmail.toLocaleString()}</b> emails in database</div>` : ''}`;
   $('enrichPauseBtn').textContent = s.status === 'paused' ? 'Resume' : 'Pause';
 }
 
@@ -1100,12 +1104,15 @@ function renderHealth(h) {
       </div>
       <div class="regiongrid">${pool.stats.map(s => {
         const total = s.successes + s.failures;
-        const cls = s.benchedForMs > 0 ? '' : total === 0 ? '' : s.failures / total > 0.3 ? 'p1' : 'p2';
+        // No colour verdict until an IP has a real sample: 1 failure out of 2
+        // requests is warmup noise, and painting it as "failing" reads as a
+        // sick pool when the aggregate failure rate is a fraction of a percent.
+        const cls = s.benchedForMs > 0 ? '' : total < 6 ? '' : s.failures / total > 0.3 ? 'p1' : 'p2';
         const state = s.benchedForMs > 0 ? `benched ${Math.ceil(s.benchedForMs/1000)}s` : s.warm ? 'warm' : 'cold';
         return `<span class="rchip ${cls}" style="${s.benchedForMs > 0 ? 'background:color-mix(in srgb,var(--err) 20%,transparent);color:var(--err)' : ''}"
           title="${esc(s.label)} — ${s.successes} ok, ${s.failures} failed, ${state}">${esc(s.label.split(':')[0])}${total ? ` ${s.successes}/${total}` : ''}</span>`;
       }).join('')}</div>
-      <p class="hint">Green = mostly succeeding · blue = some failures · red = benched (cooling down after repeated failures). Counts are ok/total requests this run.</p>
+      <p class="hint">Green = healthy · blue = real failure rate (6+ requests) · red = benched · grey = too few requests to judge.</p>
     </div>`;
   }).join('') || '';
 
