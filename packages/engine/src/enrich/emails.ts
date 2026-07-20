@@ -15,6 +15,9 @@ const JUNK_PATTERNS = [
   /\.(png|jpe?g|gif|svg|webp|css|js|ico)$/i, // filenames caught by the regex
   /^[0-9a-f]{16,}@/i, // sentry/tracking hashes
   /@(example|domain|email|yourdomain|yourwebsite|sentry|wixpress|sentry-next|mailservice|test)\./i,
+  // Registrar/builder placeholder inboxes on parked or template pages —
+  // e.g. GoDaddy's `filler@godaddy.com`, never the business's real address.
+  /@(godaddy|godaddysites|secureserver|wix|squarespace|weebly|domainsbyproxy)\./i,
   /@(2x|3x|[0-9]+x)\./i, // retina asset filenames like logo@2x.png that slipped the extension check
   /@[0-9.]+$/, // bare IPs
 ];
