@@ -116,6 +116,55 @@ describe('PlaceDatabase', () => {
     }
   });
 
+  it('supports the enrichment work list and map views', () => {
+    const { db, path } = freshDb();
+    try {
+      db.upsertMany([
+        place({ cid: '1', name: 'HasEmail', site: 'a.com', email_1: 'x@a.com', latitude: 49.2, longitude: -123.1, reviews: 10 }),
+        place({ cid: '2', name: 'NeedsEmail', site: 'b.com', latitude: 49.3, longitude: -123.0, reviews: 99 }),
+        place({ cid: '3', name: 'NoSite' }),
+      ]);
+      // The enrichment work list: has a website, missing an email.
+      const ids = db.ids({ hasWebsite: true, missingEmail: true });
+      assert.equal(ids.length, 1);
+      assert.equal(db.byId(ids[0]!)!.name, 'NeedsEmail');
+      assert.equal(db.byId('nope'), undefined);
+      assert.equal(db.countWhere({ missingEmail: true }), 2);
+      // Map points: only rows with coordinates, most-reviewed first.
+      const points = db.geo();
+      assert.equal(points.length, 2);
+      assert.equal(points[0]!.name, 'NeedsEmail');
+      assert.equal(points[0]!.lat, 49.3);
+      // Contactability rollup.
+      assert.deepEqual(db.contactStats(), { total: 3, withEmail: 1, withSite: 2, withPhone: 0 });
+    } finally {
+      db.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
+  it('summarises completed passes as coverage', () => {
+    const { db, path } = freshDb();
+    try {
+      db.resolvePass('CA/BC', 'construction');
+      db.completePass('CA/BC', 'construction', 1, 100);
+      db.resolvePass('CA/BC', 'construction');
+      db.completePass('CA/BC', 'construction', 2, 40);
+      db.resolvePass('CA/AB', 'construction'); // started, never finished
+      const cov = db.coverage();
+      assert.equal(cov.length, 1, 'only completed passes count as coverage');
+      assert.deepEqual({ region: cov[0]!.region, vertical: cov[0]!.vertical, passes: cov[0]!.passes },
+        { region: 'CA/BC', vertical: 'construction', passes: 2 });
+    } finally {
+      db.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
   it('facets return value counts for the query UI', () => {
     const { db, path } = freshDb();
     try {

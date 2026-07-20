@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Places Scraper</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
 <style>
   :root {
     --bg:#eef2fb; --card:#fff; --ink:#1a2233; --muted:#6b7688; --line:#dfe4ee;
@@ -103,6 +105,20 @@
   .proxystrip.on { background:color-mix(in srgb,var(--ok) 12%,transparent); color:var(--ok); }
   .proxystrip.off { background:color-mix(in srgb,var(--warn) 13%,transparent); color:var(--warn); }
   .proxystrip button { margin-left:auto; }
+
+  /* Coverage board */
+  .regiongrid { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
+  .rchip { font-size:11px; font-weight:600; padding:3px 7px; border-radius:5px;
+    background:var(--chip); color:var(--muted); font-variant-numeric:tabular-nums; }
+  .rchip.p1 { background:color-mix(in srgb,var(--accent) 22%,transparent); color:var(--accent); }
+  .rchip.p2 { background:color-mix(in srgb,var(--ok) 22%,transparent); color:var(--ok); }
+  .rchip.run { background:var(--accent); color:var(--on-accent); animation:pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.55; } }
+  .covrow { border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:12px; }
+  .covrow .bar { margin:10px 0 6px; }
+  #map { height:540px; border-radius:8px; border:1px solid var(--line); }
+  .leaflet-popup-content { font:13px/1.45 -apple-system,BlinkMacSystemFont,system-ui,sans-serif; }
+  .leaflet-popup-content b { font-size:14px; }
 </style>
 </head>
 <body>
@@ -196,6 +212,13 @@
 
   <div id="tab-database" hidden>
     <div class="card">
+      <h1 style="font-size:17px"><span class="dot">◎</span> Coverage — Canada + USA</h1>
+      <p class="sub">The goal: every province and state covered, for each vertical. Auto-build works through all 64 regions for you, least-covered first, one at a time. Stop whenever — every finished area is saved, and it resumes exactly where it left off.</p>
+      <div id="coverageError"></div>
+      <div id="coverageBoard"><p class="empty">Loading coverage…</p></div>
+    </div>
+
+    <div class="card">
       <h1><span class="dot">▦</span> Build your database</h1>
       <p class="sub">Sweep an entire vertical across a province, once. Every business lands in a local database you can query instantly, forever — no re-scraping.</p>
       <div id="extractError"></div>
@@ -216,6 +239,13 @@
       <p class="hint" id="extractEstimate" style="margin-top:12px"></p>
       <div style="margin-top:18px"><button class="primary" id="buildBtn">Build database</button></div>
       <div id="extractions" style="margin-top:18px"></div>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">@</span> Find emails</h1>
+      <p class="sub" id="enrichSub">Emails aren't on Google Maps — they're on each business's website. This visits every website in your database that doesn't have an email yet and fills in what it finds.</p>
+      <div id="enrichStatus"></div>
+      <div class="actions" style="margin-top:0"><button class="primary" id="enrichBtn">Find emails</button></div>
     </div>
 
     <div class="card">
@@ -243,9 +273,12 @@
       </div>
       <div class="actions" style="margin-top:16px">
         <button class="primary" id="queryBtn">Search</button>
+        <button class="ghost" id="viewTableBtn" aria-pressed="true" style="border-color:var(--accent);color:var(--accent)">Table</button>
+        <button class="ghost" id="viewMapBtn" aria-pressed="false">Map</button>
         <button class="ghost" id="exportBtn">Export all matches to CSV</button>
       </div>
       <div id="queryResults"></div>
+      <div id="mapWrap" hidden style="margin-top:14px"><div id="map"></div><p class="hint" id="mapHint"></p></div>
     </div>
   </div><!-- /tab-database -->
 </div>
@@ -611,7 +644,7 @@ function switchTab(which) {
   $('tab-database').hidden = !db;
   $('tabScrapeBtn').setAttribute('aria-selected', String(!db));
   $('tabDbBtn').setAttribute('aria-selected', String(db));
-  if (db) { refreshDbStats(); }
+  if (db) { refreshDbStats(); refreshCoverage(); }
 }
 
 // Vertical + region pickers
@@ -698,6 +731,7 @@ document.querySelector('#tab-database .chips').onclick = (e) => {
 async function refreshDbStats() {
   const s = await (await fetch('/api/database/stats')).json();
   $('dbCount').textContent = `${s.count.toLocaleString()} places`;
+  if (s.contact) renderEnrichIdle(s.contact);
   $('qCategory').innerHTML = '<option value="">Any category</option>' + s.categories.map(c => `<option value="${esc(c.value)}">${esc(c.value)} (${c.count})</option>`).join('');
   $('qCity').innerHTML = '<option value="">Any city</option>' + s.cities.map(c => `<option value="${esc(c.value)}">${esc(c.value)} (${c.count})</option>`).join('');
 }
@@ -713,15 +747,67 @@ function buildQuery() {
   return f;
 }
 
-$('queryBtn').onclick = async () => {
+/* ---- Table & map views of query results ---- */
+let dbView = 'table';
+let map = null, mapLayer = null;
+
+function setDbView(which) {
+  dbView = which;
+  $('queryResults').hidden = which !== 'table';
+  $('mapWrap').hidden = which !== 'map';
+  for (const [id, v] of [['viewTableBtn','table'],['viewMapBtn','map']]) {
+    const on = v === which;
+    $(id).setAttribute('aria-pressed', String(on));
+    $(id).style.borderColor = on ? 'var(--accent)' : '';
+    $(id).style.color = on ? 'var(--accent)' : '';
+  }
+  if (which === 'map') runMapQuery();
+}
+$('viewTableBtn').onclick = () => setDbView('table');
+$('viewMapBtn').onclick = () => setDbView('map');
+
+async function runTableQuery() {
   const { places, count } = await (await fetch('/api/database/query', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
   const cols = ['name','category','city','phone','email_1','site','rating','reviews'];
   $('queryResults').innerHTML = places.length ? `<div class="tablewrap"><table>
-    <thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+    <thead><tr>${cols.map(c=>`<th>${c === 'email_1' ? 'email' : c}</th>`).join('')}</tr></thead>
     <tbody>${places.map(p=>`<tr>${cols.map(c=>`<td>${p[c]==null?'':esc(String(p[c])).slice(0,50)}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div><p class="hint">Showing ${places.length} matches (of ${count.toLocaleString()} in database). Export gets them all.</p>`
    : `<p class="empty">No matches. ${count?'':'Build a database first.'}</p>`;
-};
+}
+
+async function runMapQuery() {
+  if (!window.L) { $('mapHint').textContent = 'Map library could not load — check your internet connection.'; return; }
+  const { points, total, truncated } = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
+  if (!map) {
+    map = L.map('map', { preferCanvas: true }).setView([54, -100], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '© OpenStreetMap contributors',
+    }).addTo(map);
+    mapLayer = L.layerGroup().addTo(map);
+  }
+  mapLayer.clearLayers();
+  const markers = [];
+  for (const p of points) {
+    const m = L.circleMarker([p.lat, p.lng], { radius: 4, weight: 1, color: '#3b6fe0', fillColor: '#3b6fe0', fillOpacity: .65 });
+    m.bindPopup(`<b>${esc(p.name ?? '')}</b><br>${esc([p.category, p.city].filter(Boolean).join(' · '))}
+      ${p.rating != null ? `<br>★ ${p.rating}${p.reviews != null ? ` (${Number(p.reviews).toLocaleString()} reviews)` : ''}` : ''}
+      ${p.phone ? `<br>${esc(p.phone)}` : ''}
+      ${p.email ? `<br><a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ''}
+      ${p.site ? `<br><a href="${esc(p.site)}" target="_blank" rel="noopener">website</a>` : ''}`);
+    m.addTo(mapLayer);
+    markers.push(m);
+  }
+  if (markers.length) map.fitBounds(L.featureGroup(markers).getBounds().pad(0.08));
+  // Leaflet measures its container when created; if that happened while hidden,
+  // the first reveal needs a size recalc or tiles render in a corner.
+  setTimeout(() => map.invalidateSize(), 50);
+  $('mapHint').textContent = truncated
+    ? `Showing the ${points.length.toLocaleString()} most-reviewed of ${total.toLocaleString()} matches — narrow the filters to see the rest.`
+    : `${points.length.toLocaleString()} places on the map. Click a pin for details.`;
+}
+
+$('queryBtn').onclick = () => { dbView === 'map' ? runMapQuery() : runTableQuery(); };
 
 $('exportBtn').onclick = async () => {
   $('exportBtn').disabled = true; $('exportBtn').textContent = 'Exporting…';
@@ -734,16 +820,115 @@ $('exportBtn').onclick = async () => {
   finally { $('exportBtn').disabled = false; setTimeout(()=>{$('exportBtn').textContent='Export all matches to CSV';}, 3000); }
 };
 
+/* ---- Coverage board: Canada + USA, per vertical ---- */
+let autoRun = null;
+
+async function refreshCoverage() {
+  try {
+    const data = await (await fetch('/api/database/coverage')).json();
+    autoRun = data.auto;
+    renderCoverage(data);
+    renderEnrichIdle(data.contact);
+  } catch { /* board is decorative; a failed refresh just keeps the last one */ }
+}
+
+function renderCoverage(data) {
+  const autoActive = autoRun && autoRun.status === 'running';
+  $('coverageBoard').innerHTML = data.verticals.map(v => {
+    const pct = v.total ? Math.round(100 * v.covered / v.total) : 0;
+    const mine = autoActive && autoRun.vertical === v.name;
+    const deepest = Math.max(0, ...v.regions.map(r => r.passes));
+    return `<div class="covrow">
+      <div class="head">
+        <div><h3 style="margin:0;font-size:15px">${v.name[0].toUpperCase()+v.name.slice(1)}</h3>
+          <div class="meta"><b>${v.covered}</b> of ${v.total} regions covered${deepest > 1 ? ` · deepest ${deepest} passes` : ''}</div></div>
+        ${mine
+          ? `<button class="ghost" data-covstop="1">Stop auto-build</button>`
+          : `<button class="ghost" data-covrun="${v.name}" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build all ${v.total}</button>`}
+      </div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      ${mine ? `<div class="meta" style="margin-bottom:6px">Auto-build running — now on <b>${esc(autoRun.current ? autoRun.current.country + '-' + autoRun.current.region : '…')}</b>, ${autoRun.regionsDone}/${autoRun.regionsTotal} regions this cycle${autoRun.failures ? `, ${autoRun.failures} failed` : ''}.</div>` : ''}
+      <details><summary style="font-size:12.5px;color:var(--muted)">Region detail</summary>
+        <div class="regiongrid">${v.regions.map(r =>
+          `<span class="rchip ${r.running ? 'run' : r.passes >= 2 ? 'p2' : r.passes === 1 ? 'p1' : ''}"
+             title="${esc(r.name)} — ${r.running ? 'building now' : r.passes + ' pass' + (r.passes === 1 ? '' : 'es')}">${r.code}${r.passes ? '·' + r.passes : ''}</span>`).join('')}
+        </div>
+        <p class="hint">Grey = not started · blue = 1 pass · green = 2+ passes (each pass catches businesses the last one missed).</p>
+      </details>
+    </div>`;
+  }).join('');
+}
+
+$('coverageBoard').onclick = async (e) => {
+  const stop = e.target.closest('[data-covstop]');
+  if (stop) { await fetch('/api/coverage/cancel', {method:'POST'}); refreshCoverage(); return; }
+  const runBtn = e.target.closest('[data-covrun]');
+  if (!runBtn) return;
+  $('coverageError').innerHTML = '';
+  const res = await fetch('/api/coverage/run', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ vertical: runBtn.dataset.covrun, language: 'en' }) });
+  const data = await res.json();
+  if (!res.ok) { $('coverageError').innerHTML = `<div class="banner err">${esc(data.error ?? 'Could not start.')}</div>`; return; }
+  autoRun = data;
+  refreshCoverage();
+};
+
+/* ---- Email enrichment ---- */
+let enrichRun = null;
+
+function renderEnrichIdle(contact) {
+  if (enrichRun && enrichRun.status === 'running') return; // live render wins
+  if (!contact) return;
+  const todo = Math.max(0, contact.withSite - contact.withEmail);
+  $('enrichSub').innerHTML = `Emails aren't on Google Maps — they're on each business's website.
+    Your database: <b>${contact.total.toLocaleString()}</b> places, <b>${contact.withEmail.toLocaleString()}</b> with an email,
+    <b>${todo.toLocaleString()}</b> websites left to check. Findings save as it goes, so you can stop anytime.`;
+  $('enrichBtn').disabled = todo === 0;
+}
+
+function renderEnrichment() {
+  if (!enrichRun) return;
+  const p = enrichRun.progress;
+  const running = enrichRun.status === 'running';
+  const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
+  $('enrichStatus').innerHTML = `
+    ${running ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+    <div class="stats" style="margin-bottom:12px">
+      <span class="status ${enrichRun.status}">${enrichRun.status}</span>
+      <span><b>${p.done.toLocaleString()}</b>/${p.total.toLocaleString()} sites checked</span>
+      <span><b>${p.withEmail.toLocaleString()}</b> emails found</span>
+      ${enrichRun.error ? `<span style="color:var(--err)">${esc(enrichRun.error)}</span>` : ''}
+    </div>`;
+  $('enrichBtn').textContent = running ? 'Stop finding emails' : 'Find emails';
+  $('enrichBtn').disabled = false;
+  if (!running) refreshDbStats();
+}
+
+$('enrichBtn').onclick = async () => {
+  if (enrichRun && enrichRun.status === 'running') { await fetch('/api/database/enrich/cancel', {method:'POST'}); return; }
+  enrichRun = await (await fetch('/api/database/enrich', {method:'POST'})).json();
+  renderEnrichment();
+};
+
 const events = new EventSource('/api/events');
 events.onmessage = (e) => {
   const m = JSON.parse(e.data);
   if (m.type === 'hello') {
     for (const j of m.jobs) jobs.set(j.id, j);
     for (const x of (m.extractions ?? [])) extractions.set(x.id, x);
+    if (m.enrichment) { enrichRun = m.enrichment; renderEnrichment(); }
+    if (m.coverage) autoRun = m.coverage;
     render(); renderExtractions();
   }
   else if (m.type === 'job') { jobs.set(m.job.id, m.job); render(); }
-  else if (m.type === 'extraction') { extractions.set(m.extraction.id, m.extraction); renderExtractions(); }
+  else if (m.type === 'extraction') {
+    extractions.set(m.extraction.id, m.extraction);
+    renderExtractions();
+    // A finished region changes the coverage picture; repaint the board.
+    if (m.extraction.status !== 'running' && m.extraction.status !== 'starting') refreshCoverage();
+  }
+  else if (m.type === 'enrichment') { enrichRun = m.enrichment; renderEnrichment(); }
+  else if (m.type === 'coverage') { autoRun = m.coverage; refreshCoverage(); }
 };
 setInterval(() => {
   if ([...jobs.values()].some((j)=>j.status==='running'||j.status==='starting')) render();

@@ -73,6 +73,15 @@ export interface Extraction {
 
 const extractions = new Map<string, Extraction>();
 const cancellers = new Map<string, AbortController>();
+const completions = new Map<string, Promise<void>>();
+
+/**
+ * Resolves when the extraction reaches a terminal state (done, failed, or
+ * cancelled). Lets an orchestrator — the coverage queue — run extractions
+ * strictly one at a time without polling.
+ */
+export const awaitExtraction = (id: string): Promise<void> =>
+  completions.get(id) ?? Promise.resolve();
 
 /** Read-only handle to the database, for the query UI and exports. */
 export function openDatabase(): PlaceDatabase {
@@ -122,7 +131,9 @@ export function startExtraction(request: ExtractionRequest, onUpdate: (e: Extrac
     },
   };
   extractions.set(id, extraction);
-  void run(extraction, controller, onUpdate);
+  const finished = run(extraction, controller, onUpdate);
+  completions.set(id, finished);
+  void finished.finally(() => completions.delete(id));
   return extraction;
 }
 

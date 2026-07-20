@@ -23,6 +23,8 @@ import {
   startExtraction, cancelExtraction, listExtractions, openDatabase, exportDatabase,
   type Extraction,
 } from './extraction.ts';
+import { startEnrichment, cancelEnrichment, getEnrichment, type EnrichmentRun } from './enrichment.ts';
+import { startCoverage, cancelCoverage, getCoverageRun, type CoverageRun } from './coverage.ts';
 import type { PlaceQuery } from '../../../packages/engine/src/store/database.ts';
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'ui');
@@ -44,6 +46,16 @@ function broadcast(job: Job): void {
 
 function broadcastExtraction(extraction: Extraction): void {
   const payload = JSON.stringify({ type: 'extraction', extraction });
+  for (const res of listeners) res.write(`data: ${payload}\n\n`);
+}
+
+function broadcastEnrichment(run: EnrichmentRun): void {
+  const payload = JSON.stringify({ type: 'enrichment', enrichment: run });
+  for (const res of listeners) res.write(`data: ${payload}\n\n`);
+}
+
+function broadcastCoverage(run: CoverageRun): void {
+  const payload = JSON.stringify({ type: 'coverage', coverage: run });
   for (const res of listeners) res.write(`data: ${payload}\n\n`);
 }
 
@@ -125,7 +137,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
-    res.write(`data: ${JSON.stringify({ type: 'hello', jobs: listJobs().map(summarise), extractions: listExtractions() })}\n\n`);
+    res.write(`data: ${JSON.stringify({
+      type: 'hello',
+      jobs: listJobs().map(summarise),
+      extractions: listExtractions(),
+      enrichment: getEnrichment(),
+      coverage: getCoverageRun(),
+    })}\n\n`);
     listeners.add(res);
     req.on('close', () => listeners.delete(res));
     return;
@@ -170,6 +188,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     try {
       return json(res, 200, {
         count: db.count,
+        contact: db.contactStats(),
         categories: db.facet('category').slice(0, 60),
         cities: db.facet('city').slice(0, 60),
         states: db.facet('state'),
@@ -177,6 +196,82 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     } finally {
       db.close();
     }
+  }
+
+  // The coverage board: for each vertical, every target region (all of Canada +
+  // USA) with its completed pass count — what the progress bars are drawn from.
+  if (req.method === 'GET' && url.pathname === '/api/database/coverage') {
+    const db = openDatabase();
+    try {
+      const passes = new Map(db.coverage().map((c) => [`${c.vertical}|${c.region}`, c.passes]));
+      const runningKeys = new Set(
+        listExtractions()
+          .filter((e) => e.status === 'running' || e.status === 'starting')
+          .map((e) => `${e.request.vertical}|${e.request.location.country}/${e.request.location.region}`),
+      );
+      const verticals = verticalNames().map((name) => {
+        const regions = Object.entries(COUNTRIES).flatMap(([cc, country]) =>
+          country.regions.map((r) => ({
+            country: cc,
+            code: r.code,
+            name: r.name,
+            passes: passes.get(`${name}|${cc}/${r.code}`) ?? 0,
+            running: runningKeys.has(`${name}|${cc}/${r.code}`),
+          })),
+        );
+        return {
+          name,
+          regions,
+          covered: regions.filter((r) => r.passes > 0).length,
+          total: regions.length,
+        };
+      });
+      return json(res, 200, { verticals, contact: db.contactStats(), auto: getCoverageRun() });
+    } finally {
+      db.close();
+    }
+  }
+
+  // Map points for the current filter — same query language as the table view.
+  if (req.method === 'POST' && url.pathname === '/api/database/geo') {
+    const filter = (await readBody(req)) as PlaceQuery;
+    const db = openDatabase();
+    try {
+      const limit = 30_000;
+      const points = db.geo(filter, limit);
+      const total = db.countWhere(filter);
+      return json(res, 200, { points, total, truncated: total > points.length });
+    } finally {
+      db.close();
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/database/enrich') {
+    return json(res, 202, startEnrichment(broadcastEnrichment));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/database/enrich/cancel') {
+    return json(res, 200, { cancelled: cancelEnrichment() });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/coverage/run') {
+    const body = (await readBody(req)) as { vertical?: string; language?: string };
+    if (!body.vertical) return json(res, 400, { error: 'Pick a vertical.' });
+    try {
+      const run = startCoverage(
+        body.vertical,
+        body.language === 'fr' ? 'fr' : 'en',
+        broadcastExtraction,
+        broadcastCoverage,
+      );
+      return json(res, 202, run);
+    } catch (error) {
+      return json(res, 409, { error: (error as Error).message });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/coverage/cancel') {
+    return json(res, 200, { cancelled: cancelCoverage() });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/database/query') {

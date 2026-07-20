@@ -42,12 +42,28 @@ export interface PlaceQuery {
   hasEmail?: boolean;
   hasPhone?: boolean;
   hasWebsite?: boolean;
+  /** Places with no email yet — the enrichment work list. */
+  missingEmail?: boolean;
   minRating?: number;
   minReviews?: number;
   /** Free-text match against name. */
   search?: string;
   limit?: number;
   offset?: number;
+}
+
+/** A map pin: position plus just enough to label it. */
+export interface GeoPoint {
+  lat: number;
+  lng: number;
+  name: string | null;
+  category: string | null;
+  city: string | null;
+  rating: number | null;
+  reviews: number | null;
+  phone: string | null;
+  email: string | null;
+  site: string | null;
 }
 
 /** The columns pulled out of the JSON blob for indexed querying. */
@@ -187,8 +203,8 @@ export class PlaceDatabase {
     return rows;
   }
 
-  /** Query stored places, reconstructing each full record from its JSON blob. */
-  query(filter: PlaceQuery = {}): StoredPlace[] {
+  /** Translate a PlaceQuery into a WHERE clause + params, shared by every read path. */
+  #where(filter: PlaceQuery): { clause: string; params: Record<string, string | number> } {
     const where: string[] = [];
     const params: Record<string, string | number> = {};
 
@@ -197,13 +213,19 @@ export class PlaceDatabase {
     if (filter.state) { where.push('state = @state'); params.state = filter.state; }
     if (filter.query) { where.push('query = @query'); params.query = filter.query; }
     if (filter.hasEmail) where.push("email_1 IS NOT NULL AND email_1 != ''");
+    if (filter.missingEmail) where.push("(email_1 IS NULL OR email_1 = '')");
     if (filter.hasPhone) where.push("phone IS NOT NULL AND phone != ''");
     if (filter.hasWebsite) where.push("site IS NOT NULL AND site != ''");
     if (filter.minRating != null) { where.push('rating >= @minRating'); params.minRating = filter.minRating; }
     if (filter.minReviews != null) { where.push('reviews >= @minReviews'); params.minReviews = filter.minReviews; }
     if (filter.search) { where.push('name LIKE @search'); params.search = `%${filter.search}%`; }
 
-    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    return { clause: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+  }
+
+  /** Query stored places, reconstructing each full record from its JSON blob. */
+  query(filter: PlaceQuery = {}): StoredPlace[] {
+    const { clause, params } = this.#where(filter);
     const limit = filter.limit ?? 1000;
     const offset = filter.offset ?? 0;
 
@@ -231,6 +253,78 @@ export class PlaceDatabase {
       offset += page.length;
       if (page.length < pageSize) return;
     }
+  }
+
+  /** One place by its stored id, for targeted updates like batch enrichment. */
+  byId(id: string): StoredPlace | undefined {
+    const row = this.#db
+      .prepare('SELECT id, first_seen, last_seen, data FROM places WHERE id = ?')
+      .get(id) as { id: string; first_seen: number; last_seen: number; data: string } | undefined;
+    if (!row) return undefined;
+    return {
+      ...(JSON.parse(row.data) as EnrichedPlace),
+      id: row.id,
+      first_seen: row.first_seen,
+      last_seen: row.last_seen,
+    };
+  }
+
+  /** Just the ids matching a filter — a stable work list that survives row updates. */
+  ids(filter: PlaceQuery = {}): string[] {
+    const { clause, params } = this.#where(filter);
+    const rows = this.#db
+      .prepare(`SELECT id FROM places ${clause}`)
+      .all(params) as { id: string }[];
+    return rows.map((r) => r.id);
+  }
+
+  /** How many rows match a filter, without materialising them. */
+  countWhere(filter: PlaceQuery = {}): number {
+    const { clause, params } = this.#where(filter);
+    const row = this.#db.prepare(`SELECT COUNT(*) AS n FROM places ${clause}`).get(params) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Lightweight map points for a filter: position plus just enough to label a
+   * pin. Kept to a handful of columns so tens of thousands of points travel to
+   * the browser without dragging every 54-field record along.
+   */
+  geo(filter: PlaceQuery = {}, limit = 30_000): GeoPoint[] {
+    const { clause, params } = this.#where(filter);
+    const and = clause ? `${clause} AND` : 'WHERE';
+    const rows = this.#db
+      .prepare(`SELECT latitude AS lat, longitude AS lng, name, category, city, rating, reviews,
+                       phone, email_1 AS email, site
+                FROM places ${and} latitude IS NOT NULL AND longitude IS NOT NULL
+                ORDER BY reviews DESC NULLS LAST LIMIT ${limit}`)
+      .all(params) as unknown as GeoPoint[];
+    return rows;
+  }
+
+  /** Contactability at a glance: how much of the database is actionable as leads. */
+  contactStats(): { total: number; withEmail: number; withSite: number; withPhone: number } {
+    const row = this.#db
+      .prepare(`SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN email_1 IS NOT NULL AND email_1 != '' THEN 1 ELSE 0 END) AS withEmail,
+                       SUM(CASE WHEN site IS NOT NULL AND site != '' THEN 1 ELSE 0 END) AS withSite,
+                       SUM(CASE WHEN phone IS NOT NULL AND phone != '' THEN 1 ELSE 0 END) AS withPhone
+                FROM places`)
+      .get() as { total: number; withEmail: number | null; withSite: number | null; withPhone: number | null };
+    return {
+      total: row.total,
+      withEmail: row.withEmail ?? 0,
+      withSite: row.withSite ?? 0,
+      withPhone: row.withPhone ?? 0,
+    };
+  }
+
+  /** Completed passes per region+vertical — the raw material for a coverage map. */
+  coverage(): { region: string; vertical: string; passes: number; lastCompleted: number | null }[] {
+    return this.#db
+      .prepare(`SELECT region, vertical, COUNT(*) AS passes, MAX(completed_at) AS lastCompleted
+                FROM passes WHERE completed_at IS NOT NULL GROUP BY region, vertical`)
+      .all() as { region: string; vertical: string; passes: number; lastCompleted: number | null }[];
   }
 
   // --- Resumability ------------------------------------------------------------
