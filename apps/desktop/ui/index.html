@@ -1125,8 +1125,8 @@ function renderActivity() {
   if (samples.length >= 2) {
     const first = samples[0], last = samples[samples.length - 1];
     const secs = Math.max(1, (last.t - first.t) / 1000);
-    const placesPerSec = (last.places - first.places) / secs;
-    if (placesPerSec > 0) rate = ` · ${placesPerSec >= 10 ? Math.round(placesPerSec) : placesPerSec.toFixed(1)} places/s`;
+    const placesPerMin = (last.places - first.places) / (secs / 60);
+    if (placesPerMin > 0) rate = ` · ${placesPerMin >= 10 ? Math.round(placesPerMin) : placesPerMin.toFixed(1)} places/min`;
     const unitsPerMin = (last.units - first.units) / (secs / 60);
     const cellsPerMin = (last.cells - first.cells) / (secs / 60);
     if (unitsPerMin >= 0.3) {
