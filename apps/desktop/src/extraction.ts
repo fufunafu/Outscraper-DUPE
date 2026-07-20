@@ -313,13 +313,14 @@ async function run(
 export async function exportLeads(
   filter: import('../../../packages/engine/src/store/database.ts').PlaceQuery,
   label: string,
-): Promise<{ path: string; rows: number }> {
+): Promise<{ path: string; rows: number; dropped: number }> {
   const { toXlsx } = await import('../../../packages/engine/src/export/xlsx.ts');
+  const { deadEmailDomains } = await import('../../../packages/engine/src/enrich/mx.ts');
   const { mkdir, writeFile } = await import('node:fs/promises');
   const db = openDatabase();
   try {
     const seen = new Set<string>();
-    const rows: Record<string, unknown>[] = [];
+    let rows: Record<string, unknown>[] = [];
     // Ordered most-reviewed first, so the kept row per email is the flagship.
     for (const p of db.iterate({ ...filter, hasEmail: true, sort: 'reviews', dir: 'desc' })) {
       const email = (p.email_1 ?? '').toLowerCase();
@@ -331,12 +332,22 @@ export async function exportLeads(
         address: p.full_address, rating: p.rating, reviews: p.reviews,
       });
     }
+
+    // MX-validate before export: an address whose domain accepts no mail is a
+    // guaranteed bounce, and bounces are what get a cold-outreach sender
+    // flagged. Only provably-dead domains drop; DNS timeouts keep the lead.
+    const dead = await deadEmailDomains(rows.map((r) => String(r.email)));
+    const before = rows.length;
+    if (dead.size > 0) {
+      rows = rows.filter((r) => !dead.has(String(r.email).split('@')[1]?.toLowerCase() ?? ''));
+    }
+
     await mkdir(OUTPUT_DIR, { recursive: true });
     const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'leads';
     const date = new Date().toISOString().slice(0, 10);
     const path = join(OUTPUT_DIR, `leads-${slug}-${date}.xlsx`);
     await writeFile(path, toXlsx(rows, ['name', 'category', 'city', 'state', 'phone', 'email', 'website', 'address', 'rating', 'reviews']));
-    return { path, rows: rows.length };
+    return { path, rows: rows.length, dropped: before - rows.length };
   } finally {
     db.close();
   }

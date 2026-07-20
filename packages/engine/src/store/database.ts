@@ -170,10 +170,18 @@ export class PlaceDatabase {
     // existed include ~half whose sites do have discoverable emails (measured
     // by re-probing a sample). Clear their checked mark once so the improved
     // pipeline gets a second pass; the guard key keeps this from ever re-running.
-    if (this.getSetting('emailRecheckV2') === null) {
+    // Its value is the re-queue timestamp: stats computed over checks made after
+    // it form an unbiased cohort (see contactStats), because the re-queue wiped
+    // the marks of exactly the no-email rows and kept the with-email ones — an
+    // all-time rate reads ~99% until the re-checks settle.
+    const recheck = this.getSetting('emailRecheckV2');
+    if (recheck === null) {
       this.#db.exec(`UPDATE places SET email_checked_at = NULL, email_attempts = 0, email_retry_at = NULL
                      WHERE email_checked_at IS NOT NULL AND (email_1 IS NULL OR email_1 = '')`);
-      this.setSetting('emailRecheckV2', 'done');
+      this.setSetting('emailRecheckV2', String(Date.now()));
+    } else if (recheck === 'done') {
+      // First cut stored no timestamp; adopt "now" — close enough, and only once.
+      this.setSetting('emailRecheckV2', String(Date.now()));
     }
   }
 
@@ -383,21 +391,35 @@ export class PlaceDatabase {
   }
 
   /** Contactability at a glance: how much of the database is actionable as leads. */
-  contactStats(): { total: number; withEmail: number; withSite: number; withPhone: number; checked: number } {
+  contactStats(): {
+    total: number; withEmail: number; withSite: number; withPhone: number; checked: number;
+    /**
+     * The unbiased cohort: checks made after the re-queue migration. The
+     * migration wiped the checked mark from exactly the no-email rows, so the
+     * all-time withEmail/checked ratio reads ~99% until re-checks settle;
+     * this pair measures only post-re-queue outcomes and stays honest.
+     */
+    checkedSince: number; withEmailSince: number;
+  } {
+    const since = Number(this.getSetting('emailRecheckV2')) || 0;
     const row = this.#db
       .prepare(`SELECT COUNT(*) AS total,
                        SUM(CASE WHEN email_1 IS NOT NULL AND email_1 != '' THEN 1 ELSE 0 END) AS withEmail,
                        SUM(CASE WHEN site IS NOT NULL AND site != '' THEN 1 ELSE 0 END) AS withSite,
                        SUM(CASE WHEN phone IS NOT NULL AND phone != '' THEN 1 ELSE 0 END) AS withPhone,
-                       SUM(CASE WHEN email_checked_at IS NOT NULL THEN 1 ELSE 0 END) AS checked
+                       SUM(CASE WHEN email_checked_at IS NOT NULL THEN 1 ELSE 0 END) AS checked,
+                       SUM(CASE WHEN email_checked_at >= @since THEN 1 ELSE 0 END) AS checkedSince,
+                       SUM(CASE WHEN email_checked_at >= @since AND email_1 IS NOT NULL AND email_1 != '' THEN 1 ELSE 0 END) AS withEmailSince
                 FROM places`)
-      .get() as { total: number; withEmail: number | null; withSite: number | null; withPhone: number | null; checked: number | null };
+      .get({ since }) as { total: number; withEmail: number | null; withSite: number | null; withPhone: number | null; checked: number | null; checkedSince: number | null; withEmailSince: number | null };
     return {
       total: row.total,
       withEmail: row.withEmail ?? 0,
       withSite: row.withSite ?? 0,
       withPhone: row.withPhone ?? 0,
       checked: row.checked ?? 0,
+      checkedSince: row.checkedSince ?? 0,
+      withEmailSince: row.withEmailSince ?? 0,
     };
   }
 

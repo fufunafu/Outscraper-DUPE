@@ -88,8 +88,25 @@ function collectPlainText(html: string, into: Set<string>): void {
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
     .replace(/&#x([0-9a-f]{1,6});/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
   for (const match of text.matchAll(EMAIL_RE)) {
-    if (isPlausible(match[0])) into.add(match[0].toLowerCase());
+    const email = trimGluedTld(match[0]);
+    if (isPlausible(email)) into.add(email.toLowerCase());
   }
+}
+
+/**
+ * Prose glued straight onto an address ("info@gmail.comOffice hours…") makes
+ * the TLD regex swallow the next word. Real TLDs never mix case, while glued
+ * prose almost always starts its next word with a capital — so a lower→upper
+ * transition inside the final label marks where the address really ended.
+ * Must run on the RAW match, before lowercasing destroys the signal.
+ */
+function trimGluedTld(email: string): string {
+  const at = email.lastIndexOf('@');
+  const lastDot = email.lastIndexOf('.');
+  if (at < 0 || lastDot < at) return email;
+  const tld = email.slice(lastDot + 1);
+  const glued = /^([a-z0-9]{2,})[A-Z]/.exec(tld);
+  return glued ? email.slice(0, lastDot + 1 + glued[1]!.length) : email;
 }
 
 /**

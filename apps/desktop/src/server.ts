@@ -338,8 +338,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (req.method === 'POST' && url.pathname === '/api/database/export-leads') {
     const body = (await readBody(req)) as { filter?: PlaceQuery; label?: string };
-    const { path, rows } = await exportLeads(body.filter ?? {}, body.label ?? 'leads');
-    return json(res, 200, { path, rows });
+    const { path, rows, dropped } = await exportLeads(body.filter ?? {}, body.label ?? 'leads');
+    return json(res, 200, { path, rows, dropped });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/database/export') {

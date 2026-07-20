@@ -171,7 +171,9 @@ describe('PlaceDatabase', () => {
       assert.equal(points[0]!.name, 'NeedsEmail');
       assert.equal(points[0]!.lat, 49.3);
       // Contactability rollup.
-      assert.deepEqual(db.contactStats(), { total: 3, withEmail: 1, withSite: 2, withPhone: 0, checked: 0 });
+      assert.deepEqual(db.contactStats(), {
+        total: 3, withEmail: 1, withSite: 2, withPhone: 0, checked: 0, checkedSince: 0, withEmailSince: 0,
+      });
     } finally {
       db.close();
       rmSync(path, { force: true });
@@ -254,7 +256,8 @@ describe('PlaceDatabase', () => {
       const db2 = new PlaceDatabase(path);
       try {
         assert.equal(db2.pendingEmailChecks(), 0, 'recheck migration must not re-run');
-        assert.equal(db2.getSetting('emailRecheckV2'), 'done');
+        // Guard is the re-queue timestamp (a numeric string), set once and kept.
+        assert.match(db2.getSetting('emailRecheckV2') ?? '', /^\d+$/);
       } finally {
         db2.close();
       }

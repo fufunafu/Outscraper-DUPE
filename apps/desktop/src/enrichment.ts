@@ -17,6 +17,7 @@
  */
 
 import { enrichPlaces, type CrawlOutcome } from '../../../packages/engine/src/enrich/enrich.ts';
+import { domainOf } from '../../../packages/engine/src/enrich/emails.ts';
 import { PlaceDatabase } from '../../../packages/engine/src/store/database.ts';
 import type { EnrichedPlace } from '../../../packages/engine/src/schema.ts';
 import { DATABASE_PATH, listExtractions } from './extraction.ts';
@@ -35,6 +36,10 @@ export interface EnrichmentState {
 const BATCH = 150;
 const IDLE_POLL_MS = 60_000;
 const PAUSE_POLL_MS = 3_000;
+
+/** Session memory of domains whose crawls keep failing; see the skip logic below. */
+const domainFails = new Map<string, number>();
+const DOMAIN_GIVE_UP = 3;
 
 const state: EnrichmentState = { status: 'idle', pending: 0, checked: 0, found: 0, startedAt: Date.now() };
 let paused = false;
@@ -91,11 +96,28 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
       state.status = 'running';
       publish();
 
-      const stored = ids
-        .map((id) => db.byId(id))
-        .filter((p): p is NonNullable<typeof p> => p != null);
-      const places: EnrichedPlace[] = stored.map(
-        ({ id: _id, first_seen: _f, last_seen: _l, ...place }) => place,
+      // Keep each id paired with its row so crawl outcomes can't misalign with
+      // ids when a row fails to load (filtering them separately used to shift
+      // every index after a missing row).
+      const pairs = ids
+        .map((id) => ({ id, row: db.byId(id) }))
+        .filter((p): p is { id: string; row: NonNullable<ReturnType<typeof db.byId>> } => p.row != null);
+
+      // Domains that keep failing this session — big-box chains whose WAF 403s
+      // every branch (Rona, London Drugs…), dead site-builders. After 3 failed
+      // crawls on a domain, stop burning requests on its remaining branches;
+      // the skipped rows still defer through the normal backoff, so a future
+      // session (fresh memory) gives the domain another chance.
+      const skippedIds: string[] = [];
+      const work: typeof pairs = [];
+      for (const p of pairs) {
+        const domain = domainOf(p.row.site);
+        if (domain && (domainFails.get(domain) ?? 0) >= DOMAIN_GIVE_UP) skippedIds.push(p.id);
+        else work.push(p);
+      }
+
+      const places: EnrichedPlace[] = work.map(
+        ({ row: { id: _id, first_seen: _f, last_seen: _l, ...place } }) => place,
       );
 
       const checkedBefore = state.checked;
@@ -125,10 +147,19 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
       db.upsertMany(enriched);
       // Reached sites are settled — an email was there or it wasn't. Unreachable
       // ones defer and retry with backoff; a timeout is not "no email".
-      const reachedIds = ids.filter((_, i) => outcomes[i] !== 'unreachable');
-      const unreachableIds = ids.filter((_, i) => outcomes[i] === 'unreachable');
+      const reachedIds = work.filter((_, i) => outcomes[i] !== 'unreachable').map((p) => p.id);
+      const unreachableIds = work.filter((_, i) => outcomes[i] === 'unreachable').map((p) => p.id);
       db.markEmailChecked(reachedIds);
-      db.markEmailDeferred(unreachableIds);
+      db.markEmailDeferred([...unreachableIds, ...skippedIds]);
+
+      // Update the per-domain failure memory from what actually happened.
+      for (let i = 0; i < work.length; i++) {
+        const domain = domainOf(work[i]!.row.site);
+        if (!domain) continue;
+        if (outcomes[i] === 'unreachable') domainFails.set(domain, (domainFails.get(domain) ?? 0) + 1);
+        else domainFails.delete(domain);
+      }
+
       state.checked = checkedBefore + ids.length;
       state.found = foundBefore + enriched.filter((p) => p.email_1).length;
       state.pending = Math.max(0, state.pending - ids.length);

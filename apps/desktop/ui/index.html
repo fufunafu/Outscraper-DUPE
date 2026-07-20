@@ -1196,16 +1196,22 @@ function renderActivity() {
 
   // Detail, shown only when the card is expanded — everything worth knowing
   // about the run, on demand, without cluttering the default glance.
-  const unitsPerMinNum = samples.length >= 2
-    ? (samples[samples.length-1].units - samples[0].units) / Math.max(0.5, (samples[samples.length-1].t - samples[0].t) / 60_000)
-    : 0;
+  const span = samples.length >= 2 ? Math.max(0.5, (samples[samples.length-1].t - samples[0].t) / 60_000) : 0;
+  const unitsPerMinNum = span ? (samples[samples.length-1].units - samples[0].units) / span : 0;
+  const cellsPerMinNum = span ? (samples[samples.length-1].cells - samples[0].cells) / span : 0;
+  // When units are flowing, report units/min. On the metro tail units stall
+  // while cells keep flowing — report cells/min so "Speed" never sits on
+  // "measuring…" while the run is plainly working.
+  const speedText = unitsPerMinNum >= 1 ? Math.round(unitsPerMinNum).toLocaleString() + ' units/min'
+    : cellsPerMinNum > 1 ? Math.round(cellsPerMinNum).toLocaleString() + ' cells/min (dense area)'
+    : 'measuring…';
   const detail = activityOpen ? `
     <div style="border-top:1px solid var(--line);margin-top:10px;padding-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:12px">
       <span class="meta">Terms</span><span><b>${p.termsDone}</b> / ${p.termsTotal} done</span>
       <span class="meta">Now searching</span><span>${p.currentTerm ? esc(p.currentTerm) : '—'}</span>
       <span class="meta">Units (area × term)</span><span><b>${p.unitsDone.toLocaleString()}</b> / ${p.unitsTotal.toLocaleString()}</span>
       <span class="meta">Map cells searched</span><span>${p.cellsSearched.toLocaleString()}</span>
-      <span class="meta">Speed</span><span>${unitsPerMinNum > 0 ? Math.round(unitsPerMinNum).toLocaleString() + ' units/min' : 'measuring…'}</span>
+      <span class="meta">Speed</span><span>${speedText}</span>
       <span class="meta">New this run</span><span><b>${p.newThisRun.toLocaleString()}</b></span>
       <span class="meta">Skipped (retry next cycle)</span><span>${p.unitsTimedOut}</span>
       <span class="meta">Proxies resting</span><span>${p.benched}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}</span>
@@ -1262,12 +1268,20 @@ function renderEnrichment() {
 
   const total = s.checked + s.pending;
   const pct = total ? Math.round(100 * s.checked / total) : 100;
-  // Two stable, all-time rates from the durable DB totals (not the per-session
-  // counters, which reset to 0 each restart and can read a scary "2%"):
-  //   success  = of sites analysed, how many yielded an email (emails per 100)
+  // Success rate — of sites actually analysed, how many yielded an email — is
+  // computed over the post-re-queue cohort (checkedSince/withEmailSince from
+  // contactStats): the re-check run clears the checked mark on exactly the
+  // empty rows, so an all-time checked-based ratio spikes to a nonsense ~99%
+  // (only email-having rows stay "checked" mid-recheck). The cohort counts
+  // every check made after the re-queue, found or not, so it can't be skewed.
+  // Until the cohort reaches 100 checks, fall back to the conservative
+  // whole-base ratio rather than showing small-sample noise.
+  //   success  = of sites analysed (post-re-queue), how many had an email
   //   coverage = how much of the website base has been analysed so far
-  const successRate = enrichContact && enrichContact.checked
-    ? Math.round(100 * enrichContact.withEmail / enrichContact.checked) : null;
+  const successRate = enrichContact && enrichContact.checkedSince >= 100
+    ? Math.round(100 * enrichContact.withEmailSince / enrichContact.checkedSince)
+    : enrichContact && enrichContact.withSite
+      ? Math.round(100 * enrichContact.withEmail / enrichContact.withSite) : null;
   const coverageRate = enrichContact && enrichContact.withSite
     ? Math.min(100, Math.round(100 * enrichContact.checked / enrichContact.withSite)) : null;
   let speed = '';

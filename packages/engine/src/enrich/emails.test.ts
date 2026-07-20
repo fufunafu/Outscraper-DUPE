@@ -81,6 +81,16 @@ describe('extractEmails', () => {
     assert.ok(emails.includes('info@beta.com'), `hex entities: got ${emails.join(',')}`);
   });
 
+  it('trims prose glued onto the TLD, but never real mixed-case addresses', () => {
+    // "…gmail.comOffice hours" — the capital marks where the address ended.
+    const { emails } = extractEmails('<p>Email us info@gmail.comOffice hours 9-5</p>', null);
+    assert.deepEqual(emails, ['info@gmail.com']);
+    // All-caps and CamelCase domains have no lower→upper transition in the TLD.
+    const caps = extractEmails('<p>SALES@ACME.COM and Info@GoDaddy.com</p>', null);
+    assert.ok(caps.emails.includes('sales@acme.com'), `got ${caps.emails.join(',')}`);
+    assert.ok(caps.emails.includes('info@godaddy.com'), `got ${caps.emails.join(',')}`);
+  });
+
   it('stays fast on pathological whitespace (regression: catastrophic backtracking)', () => {
     // A page like this — huge whitespace runs, brackets, no emails — once pinned
     // the event loop for minutes inside the obfuscation-normalising regex and
