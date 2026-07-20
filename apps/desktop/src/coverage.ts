@@ -157,8 +157,7 @@ async function execute(
 
   publish();
 
-  for (const target of queue) {
-    if (stopped) break;
+  const buildOne = async (target: { country: string; region: string }): Promise<boolean> => {
     run.current = { country: target.country, region: target.region };
     const extraction = startExtraction(
       { vertical: run.vertical, location: { country: target.country, region: target.region }, language: run.language },
@@ -166,10 +165,24 @@ async function execute(
     );
     run.currentExtractionId = extraction.id;
     publish();
-
     await awaitExtraction(extraction.id);
-    if (getExtraction(extraction.id)?.status === 'failed') run.failures += 1;
+    return getExtraction(extraction.id)?.status !== 'failed';
+  };
+
+  const failed: { country: string; region: string }[] = [];
+  for (const target of queue) {
+    if (stopped) break;
+    if (!(await buildOne(target))) { run.failures += 1; failed.push(target); }
     run.regionsDone += 1;
+    publish();
+  }
+
+  // One retry round for regions that failed (a transient error mid-region kills
+  // that extraction, but its units are checkpointed — a retry resumes the pass
+  // and usually finishes it). Regions that fail twice wait for the next sweep.
+  for (const target of failed) {
+    if (stopped) break;
+    if (await buildOne(target)) run.failures -= 1;
     publish();
   }
 

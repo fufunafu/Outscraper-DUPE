@@ -90,6 +90,12 @@ export class PlaceDatabase {
     // WAL lets reads (a query from the UI) run while a scrape is still writing.
     this.#db.exec('PRAGMA journal_mode = WAL');
     this.#db.exec('PRAGMA synchronous = NORMAL');
+    // Several workers write concurrently (extraction, email finder, backups).
+    // WAL still allows only one writer at a time, and without a busy timeout
+    // the loser fails instantly with "database is locked" — which once killed
+    // a whole region build mid-pass. Wait for the lock instead; write
+    // transactions here are milliseconds long.
+    this.#db.exec('PRAGMA busy_timeout = 15000');
     this.#migrate();
     this.#insert = this.#prepareInsert();
   }
@@ -191,7 +197,10 @@ export class PlaceDatabase {
   /** Bulk upsert inside a transaction — far faster for a batch from one cell. */
   upsertMany(places: EnrichedPlace[], at = Date.now()): { inserted: number } {
     let inserted = 0;
-    this.#db.exec('BEGIN');
+    // IMMEDIATE claims the write lock up front (honouring busy_timeout); a
+    // deferred BEGIN can hit a mid-transaction lock upgrade that fails even
+    // with a timeout when another writer is active.
+    this.#db.exec('BEGIN IMMEDIATE');
     try {
       for (const place of places) if (this.upsert(place, at)) inserted += 1;
       this.#db.exec('COMMIT');
@@ -367,7 +376,7 @@ export class PlaceDatabase {
    */
   markEmailChecked(ids: string[], at = Date.now()): void {
     const stmt = this.#db.prepare('UPDATE places SET email_checked_at = ? WHERE id = ?');
-    this.#db.exec('BEGIN');
+    this.#db.exec('BEGIN IMMEDIATE');
     try {
       for (const id of ids) stmt.run(at, id);
       this.#db.exec('COMMIT');
