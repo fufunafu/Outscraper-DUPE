@@ -1,4 +1,22 @@
 {
+ "priority": [
+  "Building Materials Supplier",
+  "Building Materials Store",
+  "Building Materials Market",
+  "Landscaping Supply Store",
+  "Home Goods Store",
+  "Hardware Store",
+  "Home Improvement Store",
+  "Lumber Store",
+  "Glass & Mirror Shop",
+  "Glass Shop",
+  "Glass Industry",
+  "Glass Merchant",
+  "Railing Contractor",
+  "Deck Builder",
+  "Swimming Pool Contractor",
+  "Fence Contractor"
+ ],
  "construction": [
   "Architect",
   "Asphalt Contractor",
