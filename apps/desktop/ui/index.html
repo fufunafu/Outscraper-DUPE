@@ -1080,6 +1080,7 @@ function renderCoverage(data) {
 
 /* ---- Live activity: current extraction with measured rate and ETA ---- */
 const rateSamples = new Map(); // extraction id -> [{t, units, places}]
+let activityOpen = false; // whether the detail panel is expanded
 
 function noteActivitySample(x) {
   if (x.status !== 'running') { rateSamples.delete(x.id); return; }
@@ -1089,7 +1090,7 @@ function noteActivitySample(x) {
   // would fake a monster rate ("13,782 units/min · ~0 min left"). A jump no
   // real scrape produces resets the measurement window.
   if (last && x.progress.unitsDone - last.units > 150) samples.length = 0;
-  samples.push({ t: Date.now(), units: x.progress.unitsDone, places: x.progress.placesInDb });
+  samples.push({ t: Date.now(), units: x.progress.unitsDone, places: x.progress.placesInDb, cells: x.progress.cellsSearched });
   // Sliding 3-minute window: smooth enough to trust, fresh enough to react.
   while (samples.length > 2 && samples[0].t < Date.now() - 180_000) samples.shift();
   rateSamples.set(x.id, samples);
@@ -1120,18 +1121,45 @@ function renderActivity() {
     const placesPerSec = (last.places - first.places) / secs;
     if (placesPerSec > 0) rate = ` · ${placesPerSec >= 10 ? Math.round(placesPerSec) : placesPerSec.toFixed(1)} places/s`;
     const unitsPerMin = (last.units - first.units) / (secs / 60);
-    if (unitsPerMin > 1) {
-      const minsLeft = Math.round((p.unitsTotal - p.unitsDone) / unitsPerMin);
+    const cellsPerMin = (last.cells - first.cells) / (secs / 60);
+    if (unitsPerMin >= 0.3) {
+      // Never show "~0 min": at least a minute while any unit remains.
+      const minsLeft = Math.max(1, Math.round((p.unitsTotal - p.unitsDone) / unitsPerMin));
       eta = ` · ~${minsLeft >= 90 ? (minsLeft / 60).toFixed(1) + ' h' : minsLeft + ' min'} left`;
+    } else if (cellsPerMin > 5 && pct < 100) {
+      // Units stalled but cells still flowing = grinding a few dense metro
+      // boxes. A units/min estimate would lie; say what's actually happening.
+      eta = ' · finishing dense areas…';
     }
   }
   const warn = `${p.benched > 20 ? ` · ${p.benched} IPs resting` : ''}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}${p.unitsTimedOut ? ` · ${p.unitsTimedOut} skipped (retry next cycle)` : ''}`;
-  host.innerHTML = `<h4>Now running</h4>
+
+  // Detail, shown only when the card is expanded — everything worth knowing
+  // about the run, on demand, without cluttering the default glance.
+  const unitsPerMinNum = samples.length >= 2
+    ? (samples[samples.length-1].units - samples[0].units) / Math.max(0.5, (samples[samples.length-1].t - samples[0].t) / 60_000)
+    : 0;
+  const detail = activityOpen ? `
+    <div style="border-top:1px solid var(--line);margin-top:10px;padding-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:12px">
+      <span class="meta">Terms</span><span><b>${p.termsDone}</b> / ${p.termsTotal} done</span>
+      <span class="meta">Now searching</span><span>${p.currentTerm ? esc(p.currentTerm) : '—'}</span>
+      <span class="meta">Units (area × term)</span><span><b>${p.unitsDone.toLocaleString()}</b> / ${p.unitsTotal.toLocaleString()}</span>
+      <span class="meta">Map cells searched</span><span>${p.cellsSearched.toLocaleString()}</span>
+      <span class="meta">Speed</span><span>${unitsPerMinNum > 0 ? Math.round(unitsPerMinNum).toLocaleString() + ' units/min' : 'measuring…'}</span>
+      <span class="meta">New this run</span><span><b>${p.newThisRun.toLocaleString()}</b></span>
+      <span class="meta">Skipped (retry next cycle)</span><span>${p.unitsTimedOut}</span>
+      <span class="meta">Proxies resting</span><span>${p.benched}${p.backoff > 1.2 ? ` · throttled ${p.backoff.toFixed(1)}×` : ''}</span>
+    </div>` : '';
+
+  host.innerHTML = `<h4 style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" id="activityToggle">
+      Now running <span class="meta" style="font-weight:400">${activityOpen ? 'less ▴' : 'details ▾'}</span></h4>
     <div style="font-weight:600;font-size:13px">${esc(x.request.vertical)} — ${esc(x.request.location.region)}
       <span class="meta" style="font-weight:400">pass ${p.pass}</span></div>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="meta">${pct}%${rate}${eta}</div>
-    <div class="meta" style="margin-top:2px"><b>${p.placesInDb.toLocaleString()}</b> total · <b>${p.newThisRun.toLocaleString()}</b> new this run${warn}</div>`;
+    <div class="meta" style="margin-top:2px"><b>${p.placesInDb.toLocaleString()}</b> total · <b>${p.newThisRun.toLocaleString()}</b> new this run${activityOpen ? '' : warn}</div>
+    ${detail}`;
+  $('activityToggle').onclick = () => { activityOpen = !activityOpen; renderActivity(); };
 }
 
 $('coverageBoard').onclick = async (e) => {

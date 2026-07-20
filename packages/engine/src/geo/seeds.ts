@@ -90,14 +90,19 @@ export interface SeedBox {
 }
 
 /**
- * Largest a coverage box may be, per side, in km. A merged metropolitan cluster
- * (Metro Vancouver spans 120km through the Fraser Valley) is far too big to
- * search as one unit — a single term over it subdivides into thousands of cells
- * and never finishes. Splitting it into a grid of bounded boxes keeps each unit
- * of work small, so it completes quickly, persists incrementally, and resumes at
- * a fine granularity.
+ * Largest a coverage box may be, per side, in km. This is the size of one unit
+ * of work, so it sets the grain of everything downstream: progress reporting,
+ * checkpointing, and the time estimate.
+ *
+ * It must be small. A dense downtown inside a big box makes a single term
+ * subdivide into hundreds of cells — one unit that grinds for half an hour while
+ * `unitsDone` sits still and the units/min estimate collapses to "~0 min left".
+ * At 12km a metro becomes several small units instead of one giant one: they run
+ * in parallel across the proxy pool, progress climbs smoothly, and the estimate
+ * stays honest. The cost is more units (more top-level searches), which the
+ * 500-proxy pool absorbs easily.
  */
-const MAX_BOX_KM = 25;
+const MAX_BOX_KM = 12;
 
 /** Split a box into a grid of sub-boxes, each at most `maxKm` per side. */
 function gridSplit(box: BBox, seeds: string[], maxKm: number): SeedBox[] {
