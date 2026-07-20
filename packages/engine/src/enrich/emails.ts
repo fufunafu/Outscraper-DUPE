@@ -77,8 +77,13 @@ function collectPlainText(html: string, into: Set<string>): void {
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    // %40 and " at " obfuscations are common; normalise the cheap ones.
-    .replace(/\s*\[?\s*(?:@|＠|\(at\)|\[at\])\s*\]?\s*/gi, '@')
+    // " at " obfuscations are common; normalise the cheap ones. Quantifiers
+    // here are BOUNDED on purpose: unbounded \s* flanking optional tokens let
+    // the engine try every split of a long whitespace run — catastrophic
+    // backtracking that froze the whole app on a real-world page. Nobody
+    // obfuscates an email with five spaces.
+    .replace(/\(\s{0,4}at\s{0,4}\)|\[\s{0,4}at\s{0,4}\]|＠/gi, '@')
+    .replace(/[ \t]{1,4}@[ \t]{1,4}/g, '@')
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
   for (const match of text.matchAll(EMAIL_RE)) {
     if (isPlausible(match[0])) into.add(match[0].toLowerCase());
@@ -120,11 +125,20 @@ export function domainOf(url: string | null): string | null {
   }
 }
 
+/**
+ * Pages bigger than this are almost entirely bundled JS; contact details live
+ * in the first fraction. Capping bounds worst-case regex time on any input —
+ * this extraction runs on the app's only thread, so a slow page here would
+ * freeze the UI, the scraper, everything.
+ */
+const MAX_HTML_BYTES = 1_500_000;
+
 /** Extract and rank every email from one page's HTML. */
 export function extractEmails(html: string, siteUrl: string | null): RankedEmails {
+  const capped = html.length > MAX_HTML_BYTES ? html.slice(0, MAX_HTML_BYTES) : html;
   const found = new Set<string>();
-  collectCfEmails(html, found);
-  collectMailto(html, found);
-  collectPlainText(html, found);
+  collectCfEmails(capped, found);
+  collectMailto(capped, found);
+  collectPlainText(capped, found);
   return { emails: rankEmails(found, domainOf(siteUrl)) };
 }

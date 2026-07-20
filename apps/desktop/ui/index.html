@@ -243,10 +243,10 @@
     </div>
 
     <div class="card">
-      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">@</span> Find emails</h1>
-      <p class="sub" id="enrichSub">Emails aren't on Google Maps — they're on each business's website. This visits every website in your database that doesn't have an email yet and fills in what it finds.</p>
+      <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">@</span> Email finder <span id="enrichBadge" class="status" style="margin-left:8px"></span></h1>
+      <p class="sub">Runs by itself. Emails aren't on Google Maps — they're on each business's website — so every place the scraper finds gets its site visited automatically, and the email lands in your database without you doing anything. Places with no website have no email to find.</p>
       <div id="enrichStatus"></div>
-      <div class="actions" style="margin-top:0"><button class="primary" id="enrichBtn">Find emails</button></div>
+      <div class="actions" style="margin-top:6px"><button class="ghost" id="enrichPauseBtn">Pause</button></div>
     </div>
 
     <div class="card">
@@ -891,40 +891,39 @@ $('coverageBoard').onclick = async (e) => {
   refreshCoverage();
 };
 
-/* ---- Email enrichment ---- */
-let enrichRun = null;
+/* ---- Email finder (automatic) ---- */
+let enrichState = null;
+let enrichContact = null;
 
 function renderEnrichIdle(contact) {
-  if (enrichRun && enrichRun.status === 'running') return; // live render wins
-  if (!contact) return;
-  const todo = Math.max(0, contact.withSite - contact.withEmail);
-  $('enrichSub').innerHTML = `Emails aren't on Google Maps — they're on each business's website.
-    Your database: <b>${contact.total.toLocaleString()}</b> places, <b>${contact.withEmail.toLocaleString()}</b> with an email,
-    <b>${todo.toLocaleString()}</b> websites left to check. Findings save as it goes, so you can stop anytime.`;
-  $('enrichBtn').disabled = todo === 0;
+  enrichContact = contact;
+  renderEnrichment();
 }
 
 function renderEnrichment() {
-  if (!enrichRun) return;
-  const p = enrichRun.progress;
-  const running = enrichRun.status === 'running';
-  const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
+  const s = enrichState;
+  const badge = $('enrichBadge');
+  if (!s) { badge.textContent = ''; return; }
+  badge.textContent = s.status === 'paused' ? 'paused' : s.status === 'idle' ? 'all caught up' : 'working';
+  badge.className = `status ${s.status === 'running' ? 'running' : s.status === 'paused' ? '' : 'done'}`;
+
+  const total = s.checked + s.pending;
+  const pct = total ? Math.round(100 * s.checked / total) : 100;
+  const rate = s.checked ? Math.round(100 * s.found / s.checked) : 0;
   $('enrichStatus').innerHTML = `
-    ${running ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
-    <div class="stats" style="margin-bottom:12px">
-      <span class="status ${enrichRun.status}">${enrichRun.status}</span>
-      <span><b>${p.done.toLocaleString()}</b>/${p.total.toLocaleString()} sites checked</span>
-      <span><b>${p.withEmail.toLocaleString()}</b> emails found</span>
-      ${enrichRun.error ? `<span style="color:var(--err)">${esc(enrichRun.error)}</span>` : ''}
+    ${s.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+    <div class="stats">
+      <span><b>${s.pending.toLocaleString()}</b> websites waiting</span>
+      <span><b>${s.checked.toLocaleString()}</b> checked since launch</span>
+      <span><b>${s.found.toLocaleString()}</b> emails found${s.checked ? ` (${rate}%)` : ''}</span>
+      ${enrichContact ? `<span><b>${enrichContact.withEmail.toLocaleString()}</b> emails in database</span>` : ''}
     </div>`;
-  $('enrichBtn').textContent = running ? 'Stop finding emails' : 'Find emails';
-  $('enrichBtn').disabled = false;
-  if (!running) refreshDbStats();
+  $('enrichPauseBtn').textContent = s.status === 'paused' ? 'Resume' : 'Pause';
 }
 
-$('enrichBtn').onclick = async () => {
-  if (enrichRun && enrichRun.status === 'running') { await fetch('/api/database/enrich/cancel', {method:'POST'}); return; }
-  enrichRun = await (await fetch('/api/database/enrich', {method:'POST'})).json();
+$('enrichPauseBtn').onclick = async () => {
+  const action = enrichState?.status === 'paused' ? 'resume' : 'pause';
+  enrichState = await (await fetch(`/api/database/enrich/${action}`, {method:'POST'})).json();
   renderEnrichment();
 };
 
@@ -1014,7 +1013,7 @@ events.onmessage = (e) => {
   if (m.type === 'hello') {
     for (const j of m.jobs) jobs.set(j.id, j);
     for (const x of (m.extractions ?? [])) extractions.set(x.id, x);
-    if (m.enrichment) { enrichRun = m.enrichment; renderEnrichment(); }
+    if (m.enrichment) { enrichState = m.enrichment; renderEnrichment(); }
     if (m.coverage) autoRun = m.coverage;
     render(); renderExtractions();
   }
@@ -1025,7 +1024,7 @@ events.onmessage = (e) => {
     // A finished region changes the coverage picture; repaint the board.
     if (m.extraction.status !== 'running' && m.extraction.status !== 'starting') refreshCoverage();
   }
-  else if (m.type === 'enrichment') { enrichRun = m.enrichment; renderEnrichment(); }
+  else if (m.type === 'enrichment') { enrichState = m.enrichment; renderEnrichment(); }
   else if (m.type === 'coverage') { autoRun = m.coverage; refreshCoverage(); }
   else if (m.type === 'health') { healthCheck = m.check; if (currentTab === 'health') renderHealthCheck(); }
 };

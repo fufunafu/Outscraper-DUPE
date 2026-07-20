@@ -23,7 +23,10 @@ import {
   startExtraction, cancelExtraction, listExtractions, openDatabase, exportDatabase,
   type Extraction,
 } from './extraction.ts';
-import { startEnrichment, cancelEnrichment, getEnrichment, type EnrichmentRun } from './enrichment.ts';
+import {
+  startAutoEnrichment, pauseEnrichment, resumeEnrichment, getEnrichment,
+  type EnrichmentState,
+} from './enrichment.ts';
 import { livePools, startProxyCheck, getProxyCheck, type ProxyCheck } from './health.ts';
 import { startCoverage, cancelCoverage, getCoverageRun, type CoverageRun } from './coverage.ts';
 import type { PlaceQuery } from '../../../packages/engine/src/store/database.ts';
@@ -50,8 +53,8 @@ function broadcastExtraction(extraction: Extraction): void {
   for (const res of listeners) res.write(`data: ${payload}\n\n`);
 }
 
-function broadcastEnrichment(run: EnrichmentRun): void {
-  const payload = JSON.stringify({ type: 'enrichment', enrichment: run });
+function broadcastEnrichment(state: EnrichmentState): void {
+  const payload = JSON.stringify({ type: 'enrichment', enrichment: state });
   for (const res of listeners) res.write(`data: ${payload}\n\n`);
 }
 
@@ -252,12 +255,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/database/enrich') {
-    return json(res, 202, startEnrichment(broadcastEnrichment));
+  if (req.method === 'POST' && url.pathname === '/api/database/enrich/pause') {
+    return json(res, 200, pauseEnrichment());
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/database/enrich/cancel') {
-    return json(res, 200, { cancelled: cancelEnrichment() });
+  if (req.method === 'POST' && url.pathname === '/api/database/enrich/resume') {
+    return json(res, 200, resumeEnrichment());
   }
 
   if (req.method === 'POST' && url.pathname === '/api/coverage/run') {
@@ -401,6 +404,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 }
 
 export function startServer(port = 4317): Promise<string> {
+  // The email finder lives for as long as the app does — no button, no opt-in.
+  startAutoEnrichment(broadcastEnrichment);
+
   const server = createServer((req, res) => {
     handle(req, res).catch((error) => {
       if (!res.headersSent) json(res, 500, { error: (error as Error).message });

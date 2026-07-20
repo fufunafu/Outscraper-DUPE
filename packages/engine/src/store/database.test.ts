@@ -145,6 +145,34 @@ describe('PlaceDatabase', () => {
     }
   });
 
+  it('queues unchecked websites for the email finder, once each', () => {
+    const { db, path } = freshDb();
+    try {
+      db.upsertMany([
+        place({ cid: '1', name: 'HasEmail', site: 'a.com', email_1: 'x@a.com' }),
+        place({ cid: '2', name: 'Unchecked', site: 'b.com' }),
+        place({ cid: '3', name: 'NoSite' }),
+      ]);
+      const targets = db.nextEmailTargets();
+      assert.equal(targets.length, 1, 'only site-having, email-missing places queue');
+      assert.equal(db.pendingEmailChecks(), 1);
+
+      // Checked (even with no email found) leaves the queue for good…
+      db.markEmailChecked(targets);
+      assert.deepEqual(db.nextEmailTargets(), []);
+      assert.equal(db.pendingEmailChecks(), 0);
+
+      // …and a later re-scrape of the same place must not re-queue it.
+      db.upsert(place({ cid: '2', name: 'Unchecked', site: 'b.com', rating: 4.0 }));
+      assert.deepEqual(db.nextEmailTargets(), [], 're-scrape kept the checked marker');
+    } finally {
+      db.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
   it('summarises completed passes as coverage', () => {
     const { db, path } = freshDb();
     try {

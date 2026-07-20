@@ -55,6 +55,27 @@ describe('extractEmails', () => {
     const { emails } = extractEmails(html, 'acme.com');
     assert.deepEqual(emails, ['real@acme.com']);
   });
+
+  it('normalises common " at " obfuscations', () => {
+    const html = '<p>info (at) acme.com or hello [at] acme.com or sales ＠ acme.com or team @ acme.com</p>';
+    const { emails } = extractEmails(html, 'acme.com');
+    for (const e of ['info@acme.com', 'hello@acme.com', 'sales@acme.com', 'team@acme.com']) {
+      assert.ok(emails.includes(e), `expected ${e}, got ${emails.join(',')}`);
+    }
+  });
+
+  it('stays fast on pathological whitespace (regression: catastrophic backtracking)', () => {
+    // A page like this — huge whitespace runs, brackets, no emails — once pinned
+    // the event loop for minutes inside the obfuscation-normalising regex and
+    // froze the entire app. Budget is generous vs. the ~ms it should take; the
+    // broken version needed minutes.
+    const nasty = `<div>${'  ['.repeat(20_000)}${' '.repeat(400_000)}${'( '.repeat(20_000)}</div>`;
+    const started = performance.now();
+    const { emails } = extractEmails(nasty, 'acme.com');
+    const elapsed = performance.now() - started;
+    assert.deepEqual(emails, []);
+    assert.ok(elapsed < 2_000, `took ${Math.round(elapsed)}ms; must stay linear`);
+  });
 });
 
 describe('extractSocials', () => {

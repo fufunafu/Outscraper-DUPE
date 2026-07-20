@@ -128,6 +128,12 @@ export class PlaceDatabase {
         PRIMARY KEY (region, vertical, pass)
       );
     `);
+
+    // Added after v1 shipped; SQLite has no ADD COLUMN IF NOT EXISTS, so probe.
+    const existing = this.#db.prepare('PRAGMA table_info(places)').all() as { name: string }[];
+    if (!existing.some((c) => c.name === 'email_checked_at')) {
+      this.#db.exec('ALTER TABLE places ADD COLUMN email_checked_at INTEGER');
+    }
   }
 
   #prepareInsert(): ReturnType<DatabaseSync['prepare']> {
@@ -317,6 +323,51 @@ export class PlaceDatabase {
       withSite: row.withSite ?? 0,
       withPhone: row.withPhone ?? 0,
     };
+  }
+
+  // --- Email enrichment queue ----------------------------------------------------
+
+  /**
+   * The next places whose websites haven't been checked for an email yet.
+   * Ordered by first_seen so the backlog drains oldest-first while new arrivals
+   * from a running extraction join the back of the queue.
+   */
+  nextEmailTargets(limit = 200): string[] {
+    const rows = this.#db
+      .prepare(`SELECT id FROM places
+                WHERE site IS NOT NULL AND site != ''
+                  AND (email_1 IS NULL OR email_1 = '')
+                  AND email_checked_at IS NULL
+                ORDER BY first_seen LIMIT ?`)
+      .all(limit) as { id: string }[];
+    return rows.map((r) => r.id);
+  }
+
+  /** How many places still await an email check, for the status readout. */
+  pendingEmailChecks(): number {
+    const row = this.#db
+      .prepare(`SELECT COUNT(*) AS n FROM places
+                WHERE site IS NOT NULL AND site != ''
+                  AND (email_1 IS NULL OR email_1 = '')
+                  AND email_checked_at IS NULL`)
+      .get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Record that these places' websites were checked (found an email or not), so
+   * a site that yields nothing is visited once, not on every cycle forever.
+   */
+  markEmailChecked(ids: string[], at = Date.now()): void {
+    const stmt = this.#db.prepare('UPDATE places SET email_checked_at = ? WHERE id = ?');
+    this.#db.exec('BEGIN');
+    try {
+      for (const id of ids) stmt.run(at, id);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   /** Completed passes per region+vertical — the raw material for a coverage map. */
