@@ -83,7 +83,7 @@ function collectPlainText(html: string, into: Set<string>): void {
     // catastrophic backtracking that froze the whole app on a real-world page.
     // Nobody obfuscates an email with five spaces.
     .replace(/\(\s{0,4}at\s{0,4}\)|\[\s{0,4}at\s{0,4}\]|＠/gi, '@')
-    .replace(/\(\s{0,4}dot\s{0,4}\)|\[\s{0,4}dot\s{0,4}\]/gi, '.')
+    .replace(/[ \t]{0,4}(?:\(\s{0,4}dot\s{0,4}\)|\[\s{0,4}dot\s{0,4}\])[ \t]{0,4}/gi, '.')
     .replace(/[ \t]{1,4}@[ \t]{1,4}/g, '@')
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
     .replace(/&#x([0-9a-f]{1,6});/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
