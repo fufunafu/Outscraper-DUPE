@@ -35,9 +35,13 @@ export interface StoredPlace extends EnrichedPlace {
 
 /** Filters for querying the stored dataset — the same shape the UI exposes. */
 export interface PlaceQuery {
+  /** Single value (legacy) or many — matched with IN. */
   category?: string;
+  categories?: string[];
   city?: string;
+  cities?: string[];
   state?: string;
+  states?: string[];
   query?: string;
   hasEmail?: boolean;
   hasPhone?: boolean;
@@ -231,14 +235,39 @@ export class PlaceDatabase {
     return rows;
   }
 
+  /**
+   * Distinct cities tagged with their province/state, so the query UI can offer
+   * cities scoped to the selected province (Vancouver in BC, not every Vancouver).
+   */
+  cityStateFacet(): { value: string; state: string | null; count: number }[] {
+    return this.#db
+      .prepare(`SELECT city AS value, state, COUNT(*) AS count FROM places
+                WHERE city IS NOT NULL GROUP BY city, state ORDER BY count DESC`)
+      .all() as { value: string; state: string | null; count: number }[];
+  }
+
   /** Translate a PlaceQuery into a WHERE clause + params, shared by every read path. */
   #where(filter: PlaceQuery): { clause: string; params: Record<string, string | number> } {
     const where: string[] = [];
     const params: Record<string, string | number> = {};
 
-    if (filter.category) { where.push('category = @category'); params.category = filter.category; }
-    if (filter.city) { where.push('city = @city'); params.city = filter.city; }
-    if (filter.state) { where.push('state = @state'); params.state = filter.state; }
+    // A column matched against one value (=) or a list (IN). The UI's multi-select
+    // sends arrays; the single-value forms are kept for older callers.
+    const inClause = (col: string, values: string[]) => {
+      const keys = values.map((v, i) => {
+        const key = `${col}${i}`;
+        params[key] = v;
+        return `@${key}`;
+      });
+      where.push(`${col} IN (${keys.join(', ')})`);
+    };
+    const categories = filter.categories?.length ? filter.categories : filter.category ? [filter.category] : [];
+    const cities = filter.cities?.length ? filter.cities : filter.city ? [filter.city] : [];
+    const states = filter.states?.length ? filter.states : filter.state ? [filter.state] : [];
+    if (categories.length) inClause('category', categories);
+    if (cities.length) inClause('city', cities);
+    if (states.length) inClause('state', states);
+
     if (filter.query) { where.push('query = @query'); params.query = filter.query; }
     if (filter.hasEmail) where.push("email_1 IS NOT NULL AND email_1 != ''");
     if (filter.missingEmail) where.push("(email_1 IS NULL OR email_1 = '')");
@@ -260,16 +289,19 @@ export class PlaceDatabase {
     const dir = filter.dir === 'asc' ? 'ASC' : 'DESC';
 
     const rows = this.#db
-      .prepare(`SELECT id, first_seen, last_seen, data FROM places ${clause}
+      .prepare(`SELECT id, first_seen, last_seen, email_checked_at, data FROM places ${clause}
                 ORDER BY ${sortCol} ${dir} NULLS LAST LIMIT ${limit} OFFSET ${offset}`)
-      .all(params) as { id: string; first_seen: number; last_seen: number; data: string }[];
+      .all(params) as { id: string; first_seen: number; last_seen: number; email_checked_at: number | null; data: string }[];
 
-    return rows.map((r) => ({
-      ...(JSON.parse(r.data) as EnrichedPlace),
-      id: r.id,
-      first_seen: r.first_seen,
-      last_seen: r.last_seen,
-    }));
+    return rows.map((r) => {
+      const place = JSON.parse(r.data) as EnrichedPlace;
+      // Distinguish "we looked and found nothing" from "not looked at yet": a
+      // checked-but-empty email reads as "unfindable" so an export/table row is
+      // never ambiguously blank. Real lead exports filter on hasEmail (SQL-level,
+      // on the true empty value), so this label never leaks into an outreach list.
+      if (r.email_checked_at != null && !place.email_1) place.email_1 = 'unfindable';
+      return { ...place, id: r.id, first_seen: r.first_seen, last_seen: r.last_seen };
+    });
   }
 
   /** Stream every stored place, for a full export without loading all into memory. */

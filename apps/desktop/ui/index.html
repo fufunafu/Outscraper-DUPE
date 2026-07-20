@@ -252,22 +252,22 @@
     <div class="card">
       <h1 style="font-size:17px"><span class="dot" style="background:var(--muted)">⌕</span> Search &amp; export</h1>
       <p class="sub">Filter what you've collected. Instant, offline, free — no scraping.</p>
+      <div class="field" style="margin-bottom:12px">
+        <label for="qCatInput">Categories <span class="hint" style="font-weight:400">— pick as many as you like</span></label>
+        <div class="tokens" id="qCatBox"><input type="text" id="qCatInput" placeholder="All categories — type to filter" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qCatPop"></div>
+        <div class="pop" id="qCatPop" role="listbox" hidden></div>
+      </div>
       <div class="row" style="grid-template-columns:1fr 1fr; gap:12px">
         <div class="field" style="margin-bottom:12px">
-          <label for="qCategory">Category</label>
-          <div class="combo">
-            <input type="text" id="qCategory" placeholder="Any category — type to search" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qCategoryPop" aria-autocomplete="list">
-            <button type="button" class="combo-caret" data-for="qCategory" aria-label="Toggle category list">▾</button>
-          </div>
-          <div class="pop" id="qCategoryPop" role="listbox" hidden></div>
+          <label for="qStateInput">Province / State</label>
+          <div class="tokens" id="qStateBox"><input type="text" id="qStateInput" placeholder="All provinces / states" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qStatePop"></div>
+          <div class="pop" id="qStatePop" role="listbox" hidden></div>
         </div>
         <div class="field" style="margin-bottom:12px">
-          <label for="qCity">City</label>
-          <div class="combo">
-            <input type="text" id="qCity" placeholder="Any city — type to search" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qCityPop" aria-autocomplete="list">
-            <button type="button" class="combo-caret" data-for="qCity" aria-label="Toggle city list">▾</button>
-          </div>
+          <label for="qCityInput">City</label>
+          <div class="tokens" id="qCityBox"><input type="text" id="qCityInput" placeholder="All cities — type to filter" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="qCityPop"></div>
           <div class="pop" id="qCityPop" role="listbox" hidden></div>
+          <p class="hint" id="qCityHint" style="margin-top:6px"></p>
         </div>
       </div>
       <div class="chips" style="margin-bottom:12px">
@@ -282,6 +282,8 @@
       </div>
       <div class="actions" style="margin-top:16px">
         <button class="primary" id="queryBtn">Search</button>
+        <button class="ghost" id="clearBtn">Clear</button>
+        <button class="ghost" id="showOnMapBtn" title="Show these results on the map above">Show on map</button>
         <button class="ghost" id="exportBtn">Export all matches to CSV</button>
         <button class="ghost" id="leadsBtn" title="Only rows with an email, deduplicated by email — ready for outreach">Export lead list (.xlsx)</button>
       </div>
@@ -796,80 +798,88 @@ $('extractions').onclick = (ev) => {
 
 // ---- Query the database ----
 
-// Searchable single-select combobox over a fixed {value, count} list, sorted
-// alphabetically. Type to filter; empty selection means "Any". buildQuery reads
-// the confirmed value via .value(); a half-typed string that matches nothing is
-// discarded on close so it never leaks into the query.
-function makeCombo({ inputId, popId, anyLabel }) {
-  const input = $(inputId), pop = $(popId);
-  let all = [];         // [{value, count}] sorted A→Z
-  let shown = [];       // currently visible subset
-  let active = 0;
-  let selected = '';    // confirmed selection ('' = Any)
+// Multi-select token picker over a {value, count, [state]} list. Click options
+// to toggle them (they become removable tokens); type to filter. `values()`
+// returns the chosen values; empty = "all". An optional `optionFilter` scopes
+// which options show (used to limit cities to the chosen provinces).
+function makeMulti({ boxId, inputId, popId, placeholder, onChange }) {
+  const box = $(boxId), input = $(inputId), pop = $(popId);
+  const selected = new Set();
+  let all = [];              // [{value, count, state?}] sorted A→Z
+  let optionFilter = null;   // predicate(o) => boolean, or null for all
 
+  input.placeholder = placeholder;
+
+  function renderTokens() {
+    [...box.querySelectorAll('.token')].forEach(t => t.remove());
+    for (const v of selected) {
+      const el = document.createElement('span');
+      el.className = 'token';
+      el.innerHTML = `${esc(v)} <button type="button" aria-label="Remove ${esc(v)}">×</button>`;
+      el.querySelector('button').onclick = (e) => { e.stopPropagation(); selected.delete(v); renderTokens(); onChange?.(); };
+      box.insertBefore(el, input);
+    }
+    input.placeholder = selected.size ? '' : placeholder;
+  }
   function open() {
     const q = input.value.trim().toLowerCase();
-    shown = q ? all.filter(o => o.value.toLowerCase().includes(q)) : all;
-    active = 0;
-    pop.innerHTML = shown.length
-      ? shown.map((o, i) =>
-          `<div class="opt" role="option" data-i="${i}" aria-selected="${i===0}">${esc(o.value)} <span class="why">${o.count.toLocaleString()}</span></div>`).join('')
+    let opts = optionFilter ? all.filter(optionFilter) : all;
+    if (q) opts = opts.filter(o => o.value.toLowerCase().includes(q));
+    opts = opts.slice(0, 300); // keep the list light; typing narrows further
+    pop.innerHTML = opts.length
+      ? opts.map(o => `<div class="opt" data-v="${esc(o.value)}">
+          <input type="checkbox" ${selected.has(o.value) ? 'checked' : ''} tabindex="-1">
+          <span>${esc(o.value)}${o.state ? ` <span class="meta">${esc(o.state)}</span>` : ''}</span></div>`).join('')
       : `<div class="opt head">No matches</div>`;
-    position(pop, input);
+    position(pop, box);
     pop.hidden = false;
     input.setAttribute('aria-expanded', 'true');
   }
-  function close() {
-    pop.hidden = true;
-    input.setAttribute('aria-expanded', 'false');
-    // Snap the text back to the confirmed selection so stray typing is ignored.
-    input.value = selected;
-  }
-  function pick(val) {
-    selected = val || '';
-    input.value = selected;
-    pop.hidden = true;
-    input.setAttribute('aria-expanded', 'false');
-  }
+  function close() { pop.hidden = true; input.value = ''; input.setAttribute('aria-expanded', 'false'); }
 
-  input.onfocus = () => { input.select(); open(); };
+  box.onclick = () => { input.focus(); open(); };
   input.oninput = open;
   input.onkeydown = (e) => {
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (pop.hidden) { open(); return; }
-      if (!shown.length) return;
-      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length;
-      [...pop.querySelectorAll('.opt[data-i]')].forEach((o, i) => o.setAttribute('aria-selected', String(i === active)));
-      pop.querySelector(`.opt[data-i="${active}"]`)?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (!pop.hidden && shown[active]) pick(shown[active].value);
-    } else if (e.key === 'Escape') {
-      close(); input.blur();
+    if (e.key === 'Escape') { close(); input.blur(); }
+    else if (e.key === 'Backspace' && !input.value && selected.size) {
+      const last = [...selected].pop(); selected.delete(last); renderTokens(); onChange?.();
     }
   };
-  pop.onclick = (e) => { const o = e.target.closest('.opt[data-i]'); if (o) pick(shown[+o.dataset.i].value); };
-  // Caret toggles the list. Use mousedown so we beat the input's focus/blur race.
-  document.querySelector(`[data-for="${inputId}"]`).onmousedown = (e) => {
-    e.preventDefault();
-    if (pop.hidden) { input.focus(); open(); } else { close(); }
+  pop.onclick = (e) => {
+    const o = e.target.closest('.opt[data-v]'); if (!o) return;
+    const v = o.dataset.v;
+    selected.has(v) ? selected.delete(v) : selected.add(v);
+    renderTokens(); open(); onChange?.();
   };
   document.addEventListener('click', (e) => {
-    if (!e.target.closest(`#${inputId}, #${popId}, [data-for="${inputId}"]`)) close();
+    if (!e.target.closest(`#${boxId}, #${popId}`)) close();
   });
 
   return {
-    value: () => selected,
-    set: (val) => pick(val || ''),
-    setData(items) {
-      all = (items || []).slice().sort((a, b) => a.value.localeCompare(b.value));
-      input.placeholder = anyLabel;
-    },
+    values: () => [...selected],
+    add(v) { if (v) { selected.add(v); renderTokens(); onChange?.(); } },
+    clear() { selected.clear(); renderTokens(); },
+    setFilter(fn) { optionFilter = fn; },
+    setData(items) { all = (items || []).slice().sort((a, b) => a.value.localeCompare(b.value)); },
   };
 }
-const catCombo = makeCombo({ inputId: 'qCategory', popId: 'qCategoryPop', anyLabel: 'Any category — type to search' });
-const cityCombo = makeCombo({ inputId: 'qCity', popId: 'qCityPop', anyLabel: 'Any city — type to search' });
+
+// City options carry their province, so picking provinces scopes the city list.
+let cityStates = [];
+const catMulti = makeMulti({ boxId: 'qCatBox', inputId: 'qCatInput', popId: 'qCatPop', placeholder: 'All categories — type to filter' });
+const cityMulti = makeMulti({ boxId: 'qCityBox', inputId: 'qCityInput', popId: 'qCityPop', placeholder: 'All cities — type to filter' });
+const stateMulti = makeMulti({ boxId: 'qStateBox', inputId: 'qStateInput', popId: 'qStatePop', placeholder: 'All provinces / states', onChange: scopeCities });
+
+function scopeCities() {
+  const states = new Set(stateMulti.values());
+  if (states.size) {
+    cityMulti.setFilter(o => states.has(o.state));
+    $('qCityHint').textContent = `Showing cities in ${[...states].join(', ')}`;
+  } else {
+    cityMulti.setFilter(null);
+    $('qCityHint').textContent = '';
+  }
+}
 
 const qFilters = new Set();
 document.querySelector('#tab-database .chips').onclick = (e) => {
@@ -883,14 +893,18 @@ async function refreshDbStats() {
   const s = await (await fetch('/api/database/stats')).json();
   $('dbCount').textContent = `${s.count.toLocaleString()} places`;
   if (s.contact) renderEnrichIdle(s.contact);
-  catCombo.setData(s.categories);
-  cityCombo.setData(s.cities);
+  catMulti.setData(s.categories);
+  stateMulti.setData(s.states);
+  cityStates = s.cities || [];
+  cityMulti.setData(cityStates);
+  scopeCities();
 }
 
 function buildQuery() {
   const f = {};
-  if (catCombo.value()) f.category = catCombo.value();
-  if (cityCombo.value()) f.city = cityCombo.value();
+  const cats = catMulti.values(); if (cats.length) f.categories = cats;
+  const states = stateMulti.values(); if (states.length) f.states = states;
+  const cities = cityMulti.values(); if (cities.length) f.cities = cities;
   for (const k of qFilters) f[k] = true;
   const mr = Number($('qMinRating').value); if (mr>0) f.minRating = mr;
   const mv = Number($('qMinReviews').value); if (mv>0) f.minReviews = mv;
@@ -965,9 +979,11 @@ $('queryResults').onclick = async (e) => {
 const CAT_PALETTE = ['#3b6fe0','#e0563b','#22a06b','#a05fd6','#e0a53b','#2aa3c9','#d64f8b','#7a8a3a','#8a6d4f','#5b6b7a'];
 const catColor = (name) => CAT_PALETTE[[...(name ?? '')].reduce((a, ch) => a + ch.charCodeAt(0), 0) % CAT_PALETTE.length];
 
-async function runMapQuery() {
+// The map is the database overview: by default it shows everything, independent
+// of the search filters below. Pass a filter (from "Show on map") to scope it.
+async function runMapQuery(filter = {}) {
   if (!window.L) { $('mapHint').textContent = 'Map library could not load — check your internet connection.'; return; }
-  const { points, total, truncated } = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
+  const { points, total, truncated } = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(filter) })).json();
   if (!map) {
     map = L.map('map', { preferCanvas: true }).setView([54, -100], 4);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -1011,24 +1027,37 @@ async function runMapQuery() {
     : '';
 }
 
-// A category name anywhere (pin popup, legend) applies it as the filter.
+// Clicking a category on a map pin adds it to the category filter and searches
+// the table (the map stays as-is — you clicked it, you're already looking at it).
 document.addEventListener('click', (e) => {
   const link = e.target.closest('[data-catfilter]');
   if (!link) return;
   e.preventDefault();
-  catCombo.set(link.dataset.catfilter);
+  catMulti.add(link.dataset.catfilter);
   qOffset = 0;
   runTableQuery();
-  runMapQuery();
 });
 
-// The map and the table are two views of the same filter; keep them in step.
-$('queryBtn').onclick = () => { qOffset = 0; runTableQuery(); runMapQuery(); };
+// Search updates the table only. The map above is the database overview and
+// stays put unless you explicitly ask to see the current results on it — users
+// found it jarring that every search silently redrew the map.
+$('queryBtn').onclick = () => { qOffset = 0; runTableQuery(); };
+$('showOnMapBtn').onclick = () => { runMapQuery(buildQuery()); $('map').scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+
+$('clearBtn').onclick = () => {
+  catMulti.clear(); stateMulti.clear(); cityMulti.clear(); scopeCities();
+  qFilters.clear();
+  document.querySelectorAll('#tab-database .chips .chip').forEach(c => c.setAttribute('aria-pressed', 'false'));
+  $('qMinRating').value = ''; $('qMinReviews').value = ''; $('qSearch').value = '';
+  qOffset = 0; qSort = 'reviews'; qDir = 'desc';
+  runTableQuery();
+  runMapQuery(); // reset the map back to the full database too
+};
 
 $('leadsBtn').onclick = async () => {
   $('leadsBtn').disabled = true; $('leadsBtn').textContent = 'Building lead list…';
   try {
-    const label = [catCombo.value(), cityCombo.value()].filter(Boolean).join('-') || 'all';
+    const label = [...catMulti.values(), ...stateMulti.values(), ...cityMulti.values()].slice(0, 3).join('-') || 'all';
     const { path, rows } = await (await fetch('/api/database/export-leads', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
     await fetch('/api/reveal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
     $('leadsBtn').textContent = `${rows.toLocaleString()} leads exported ✓`;
@@ -1039,7 +1068,7 @@ $('leadsBtn').onclick = async () => {
 $('exportBtn').onclick = async () => {
   $('exportBtn').disabled = true; $('exportBtn').textContent = 'Exporting…';
   try {
-    const label = [$('vertical').value, $('extractRegion').value, catCombo.value()].filter(Boolean).join('-') || 'places';
+    const label = [...catMulti.values(), ...stateMulti.values(), ...cityMulti.values()].slice(0, 3).join('-') || 'places';
     const { path, rows } = await (await fetch('/api/database/export', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
     await fetch('/api/reveal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
     $('exportBtn').textContent = `Exported ${rows.toLocaleString()} rows ✓`;
@@ -1209,12 +1238,14 @@ function renderEnrichment() {
 
   const total = s.checked + s.pending;
   const pct = total ? Math.round(100 * s.checked / total) : 100;
-  // All-time hit rate (emails in DB / sites ever checked) — stable across app
-  // restarts, unlike the per-session found/checked which resets to 0 and can
-  // read a scary "2%" mid-run on a low-yield batch (e.g. chain stores).
-  const allTimeHit = enrichContact && enrichContact.checked
-    ? Math.round(100 * enrichContact.withEmail / enrichContact.checked)
-    : null;
+  // Two stable, all-time rates from the durable DB totals (not the per-session
+  // counters, which reset to 0 each restart and can read a scary "2%"):
+  //   success  = of sites analysed, how many yielded an email (emails per 100)
+  //   coverage = how much of the website base has been analysed so far
+  const successRate = enrichContact && enrichContact.checked
+    ? Math.round(100 * enrichContact.withEmail / enrichContact.checked) : null;
+  const coverageRate = enrichContact && enrichContact.withSite
+    ? Math.min(100, Math.round(100 * enrichContact.checked / enrichContact.withSite)) : null;
   let speed = '';
   if (enrichSamples.length >= 2) {
     const first = enrichSamples[0], last = enrichSamples[enrichSamples.length - 1];
@@ -1227,7 +1258,8 @@ function renderEnrichment() {
   $('enrichStatus').innerHTML = `
     ${s.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
     <div class="meta"><b>${s.pending.toLocaleString()}</b> waiting${speed}</div>
-    <div class="meta" style="margin-top:2px">${enrichContact ? `<b>${enrichContact.withEmail.toLocaleString()}</b> emails found${allTimeHit != null ? ` · ${allTimeHit}% of sites checked` : ''}` : `<b>${s.checked.toLocaleString()}</b> checked`}</div>`;
+    <div class="meta" style="margin-top:2px">${enrichContact ? `<b>${enrichContact.withEmail.toLocaleString()}</b> emails found${successRate != null ? ` · <span title="Of websites analysed, how many had a findable email (emails per 100 sites)">${successRate}% success rate</span>` : ''}` : `<b>${s.checked.toLocaleString()}</b> checked`}</div>
+    ${coverageRate != null ? `<div class="meta" style="margin-top:2px" title="How much of your website base has been analysed for emails">${coverageRate}% coverage rate · ${enrichContact.checked.toLocaleString()} of ${enrichContact.withSite.toLocaleString()} sites analysed</div>` : ''}`;
   $('enrichPauseBtn').textContent = s.status === 'paused' ? 'Resume' : 'Pause';
 }
 
@@ -1382,7 +1414,7 @@ setInterval(() => {
 
 // Honour a tab hash present on first load (e.g. a bookmarked #database). Done
 // last, once every const the database/health paths touch has initialized —
-// running it earlier hits the temporal dead zone for map/catCombo/enrichContact.
+// running it earlier hits the temporal dead zone for map/catMulti/enrichContact.
 if (TABS[location.hash.slice(1)]) switchTab(location.hash.slice(1), false);
 </script>
 </body>

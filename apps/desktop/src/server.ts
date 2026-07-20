@@ -207,7 +207,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         // searchable comboboxes, so a top-N cap would silently hide the long
         // tail (e.g. "Railing contractor", ranked ~95th) that a user can type.
         categories: db.facet('category'),
-        cities: db.facet('city'),
+        cities: db.cityStateFacet(),
         states: db.facet('state'),
       });
     } finally {

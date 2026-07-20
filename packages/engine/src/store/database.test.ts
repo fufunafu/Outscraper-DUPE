@@ -116,6 +116,41 @@ describe('PlaceDatabase', () => {
     }
   });
 
+  it('filters by multiple categories/cities/states and derives unfindable emails', () => {
+    const { db, path } = freshDb();
+    try {
+      db.upsertMany([
+        place({ cid: '1', category: 'Glass Shop', city: 'Calgary', state: 'Alberta', site: 'a.com' }),
+        place({ cid: '2', category: 'Deck Builder', city: 'Vancouver', state: 'British Columbia', site: 'b.com' }),
+        place({ cid: '3', category: 'Fence Contractor', city: 'Victoria', state: 'British Columbia' }),
+        place({ cid: '4', category: 'Plumber', city: 'Calgary', state: 'Alberta' }),
+      ]);
+      // Multi-value IN filters.
+      assert.equal(db.query({ categories: ['Glass Shop', 'Deck Builder'] }).length, 2);
+      assert.equal(db.query({ states: ['British Columbia'] }).length, 2);
+      assert.equal(db.query({ cities: ['Calgary', 'Victoria'] }).length, 3); // 2 Calgary + 1 Victoria
+      assert.equal(db.query({ categories: ['Glass Shop'], states: ['British Columbia'] }).length, 0);
+
+      // City→state facet lets the UI scope cities to a province.
+      const van = db.cityStateFacet().find((c) => c.value === 'Vancouver')!;
+      assert.equal(van.state, 'British Columbia');
+      assert.equal(van.count, 1);
+
+      // Checked-but-empty email renders as "unfindable"; unchecked stays blank.
+      const id = db.ids({ hasWebsite: true, missingEmail: true })[0]!;
+      db.markEmailChecked([id]);
+      const checked = db.query({ hasWebsite: true }).find((p) => p.id === id)!;
+      assert.equal(checked.email_1, 'unfindable');
+      // A hasEmail query still excludes it (SQL sees the true empty value).
+      assert.equal(db.query({ hasEmail: true }).length, 0);
+    } finally {
+      db.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
   it('supports the enrichment work list and map views', () => {
     const { db, path } = freshDb();
     try {
