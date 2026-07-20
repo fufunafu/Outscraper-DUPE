@@ -64,6 +64,23 @@ describe('extractEmails', () => {
     }
   });
 
+  it('finds emails in JSON-LD structured data, where JS-rendered sites keep them', () => {
+    // Wix/Squarespace pages often carry the address ONLY here — the visible
+    // page renders it client-side, invisible to a plain fetch.
+    const html = `<script type="application/ld+json">
+      {"@type":"LocalBusiness","name":"Acme Glass","email":"mailto:info@acme.com","telephone":"+1"}
+    </script><div id="app"></div>`;
+    const { emails } = extractEmails(html, 'https://acme.com');
+    assert.ok(emails.includes('info@acme.com'), `got ${emails.join(',')}`);
+  });
+
+  it('normalises " dot " obfuscations and hex entities', () => {
+    const html = '<p>info (at) acme (dot) com &#x69;&#x6e;&#x66;&#x6f;&#x40;beta.com</p>';
+    const { emails } = extractEmails(html, 'acme.com');
+    assert.ok(emails.includes('info@acme.com'), `dot-obfuscated: got ${emails.join(',')}`);
+    assert.ok(emails.includes('info@beta.com'), `hex entities: got ${emails.join(',')}`);
+  });
+
   it('stays fast on pathological whitespace (regression: catastrophic backtracking)', () => {
     // A page like this — huge whitespace runs, brackets, no emails — once pinned
     // the event loop for minutes inside the obfuscation-normalising regex and

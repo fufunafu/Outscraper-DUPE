@@ -16,12 +16,20 @@ import { crawlSite } from './crawl.ts';
 import { extractEmails } from './emails.ts';
 import { extractSocials } from './socials.ts';
 
+/** What happened when one place's site was crawled. */
+export type CrawlOutcome = 'ok' | 'unreachable' | 'no_site';
+
 export interface EnrichOptions {
   proxies?: ProxyPool | null;
   /** Sites fetched at once. Network-bound, so this can run higher than scraping. */
   concurrency?: number;
   signal?: AbortSignal;
   perSiteTimeoutMs?: number;
+  /**
+   * When provided, filled per input index with each place's crawl outcome, so a
+   * caller can treat "site unreachable" differently from "reached, no email".
+   */
+  outcomes?: CrawlOutcome[];
 }
 
 export interface EnrichProgress {
@@ -32,16 +40,19 @@ export interface EnrichProgress {
 }
 
 /** Populate the enrichment fields of one place from its website. */
-async function enrichOne(place: Place, options: EnrichOptions): Promise<EnrichedPlace> {
+async function enrichOne(
+  place: Place,
+  options: EnrichOptions,
+): Promise<{ place: EnrichedPlace; outcome: CrawlOutcome }> {
   const enriched: EnrichedPlace = { ...place };
-  if (!place.site) return enriched;
+  if (!place.site) return { place: enriched, outcome: 'no_site' };
 
   const crawl = await crawlSite(place.site, {
     dispatcher: options.proxies?.next(),
     timeoutMs: options.perSiteTimeoutMs ?? 12_000,
     signal: options.signal,
   });
-  if (!crawl.html) return enriched;
+  if (!crawl.html) return { place: enriched, outcome: 'unreachable' };
 
   const { emails } = extractEmails(crawl.html, crawl.finalUrl ?? place.site);
   const socials = extractSocials(crawl.html);
@@ -55,7 +66,7 @@ async function enrichOne(place: Place, options: EnrichOptions): Promise<Enriched
   enriched.twitter = socials.twitter;
   enriched.youtube = socials.youtube;
   enriched.tiktok = socials.tiktok;
-  return enriched;
+  return { place: enriched, outcome: 'ok' };
 }
 
 /**
@@ -79,12 +90,14 @@ export async function enrichPlaces(
       const index = cursor++;
       const place = places[index]!;
       try {
-        const enriched = await enrichOne(place, options);
+        const { place: enriched, outcome } = await enrichOne(place, options);
         results[index] = enriched;
+        if (options.outcomes) options.outcomes[index] = outcome;
         if (enriched.email_1) withEmail += 1;
       } catch {
         // A crawl failure must not lose the place — keep the un-enriched row.
         results[index] = { ...place };
+        if (options.outcomes) options.outcomes[index] = 'unreachable';
       }
       done += 1;
       onProgress?.({ done, total: places.length, withEmail, lastSite: place.site ?? undefined });

@@ -154,8 +154,26 @@ export class PlaceDatabase {
 
     // Added after v1 shipped; SQLite has no ADD COLUMN IF NOT EXISTS, so probe.
     const existing = this.#db.prepare('PRAGMA table_info(places)').all() as { name: string }[];
-    if (!existing.some((c) => c.name === 'email_checked_at')) {
-      this.#db.exec('ALTER TABLE places ADD COLUMN email_checked_at INTEGER');
+    const addColumn = (name: string, decl: string): void => {
+      if (!existing.some((c) => c.name === name)) {
+        this.#db.exec(`ALTER TABLE places ADD COLUMN ${name} ${decl}`);
+      }
+    };
+    addColumn('email_checked_at', 'INTEGER');
+    // Email-check retry state: transient failures (timeouts, DNS blips, a
+    // congested connection) used to mark a site permanently checked after one
+    // shot. Now a failed crawl defers the row and retries with backoff.
+    addColumn('email_attempts', 'INTEGER NOT NULL DEFAULT 0');
+    addColumn('email_retry_at', 'INTEGER');
+
+    // One-time re-queue: rows checked before retries and the smarter crawler
+    // existed include ~half whose sites do have discoverable emails (measured
+    // by re-probing a sample). Clear their checked mark once so the improved
+    // pipeline gets a second pass; the guard key keeps this from ever re-running.
+    if (this.getSetting('emailRecheckV2') === null) {
+      this.#db.exec(`UPDATE places SET email_checked_at = NULL, email_attempts = 0, email_retry_at = NULL
+                     WHERE email_checked_at IS NOT NULL AND (email_1 IS NULL OR email_1 = '')`);
+      this.setSetting('emailRecheckV2', 'done');
     }
   }
 
@@ -390,14 +408,15 @@ export class PlaceDatabase {
    * Ordered by first_seen so the backlog drains oldest-first while new arrivals
    * from a running extraction join the back of the queue.
    */
-  nextEmailTargets(limit = 200): string[] {
+  nextEmailTargets(limit = 200, now = Date.now()): string[] {
     const rows = this.#db
       .prepare(`SELECT id FROM places
                 WHERE site IS NOT NULL AND site != ''
                   AND (email_1 IS NULL OR email_1 = '')
                   AND email_checked_at IS NULL
+                  AND (email_retry_at IS NULL OR email_retry_at <= ?)
                 ORDER BY first_seen LIMIT ?`)
-      .all(limit) as { id: string }[];
+      .all(now, limit) as { id: string }[];
     return rows.map((r) => r.id);
   }
 
@@ -421,6 +440,31 @@ export class PlaceDatabase {
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       for (const id of ids) stmt.run(at, id);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * Record that these places' websites could not be reached — a state distinct
+   * from "reached, no email there". A timeout on a congested line or a DNS blip
+   * shouldn't write a site off forever, so failures defer with backoff: retry
+   * in 1 hour, then 6 hours, and only a third failure marks the row checked.
+   */
+  markEmailDeferred(ids: string[], at = Date.now()): void {
+    const stmt = this.#db.prepare(`
+      UPDATE places SET
+        email_attempts = email_attempts + 1,
+        email_retry_at = CASE WHEN email_attempts >= 2 THEN NULL
+                              WHEN email_attempts = 0 THEN @at + 3600000
+                              ELSE @at + 21600000 END,
+        email_checked_at = CASE WHEN email_attempts >= 2 THEN @at ELSE NULL END
+      WHERE id = @id`);
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of ids) stmt.run({ at, id });
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');

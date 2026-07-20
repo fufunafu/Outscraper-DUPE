@@ -890,7 +890,15 @@ document.querySelector('#tab-database .chips').onclick = (e) => {
 };
 
 async function refreshDbStats() {
-  const s = await (await fetch('/api/database/stats')).json();
+  let s;
+  try {
+    s = await (await fetch('/api/database/stats')).json();
+  } catch {
+    // Busy server on first paint — retry so the filter lists actually populate
+    // (an empty category list is what makes a valid search read "NO MATCHES").
+    if (!catMulti.values().length && !$('qCatPop').innerHTML) setTimeout(refreshDbStats, 4000);
+    return;
+  }
   $('dbCount').textContent = `${s.count.toLocaleString()} places`;
   if (s.contact) renderEnrichIdle(s.contact);
   catMulti.setData(s.categories);
@@ -979,23 +987,35 @@ $('queryResults').onclick = async (e) => {
 const CAT_PALETTE = ['#3b6fe0','#e0563b','#22a06b','#a05fd6','#e0a53b','#2aa3c9','#d64f8b','#7a8a3a','#8a6d4f','#5b6b7a'];
 const catColor = (name) => CAT_PALETTE[[...(name ?? '')].reduce((a, ch) => a + ch.charCodeAt(0), 0) % CAT_PALETTE.length];
 
+// Create the Leaflet map (tiles, view) once. Kept separate from data loading so
+// the map is always on screen even if a points fetch fails — the old order
+// (fetch first, create map after) left a blank box whenever the server was busy.
+function ensureMap() {
+  if (map || !window.L) return;
+  map = L.map('map', { preferCanvas: true }).setView([54, -100], 4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© OpenStreetMap contributors',
+  }).addTo(map);
+  // Leaflet measures its container once, at creation. On first load that can
+  // happen before the flex layout settles, leaving tiles stuck in a corner. A
+  // ResizeObserver invalidates on every real size change — the initial 0→full
+  // sizing included — so the map is correct without a guessed timeout.
+  new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById('map'));
+}
+
 // The map is the database overview: by default it shows everything, independent
 // of the search filters below. Pass a filter (from "Show on map") to scope it.
 async function runMapQuery(filter = {}) {
   if (!window.L) { $('mapHint').textContent = 'Map library could not load — check your internet connection.'; return; }
-  const { points, total, truncated } = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(filter) })).json();
-  if (!map) {
-    map = L.map('map', { preferCanvas: true }).setView([54, -100], 4);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap contributors',
-    }).addTo(map);
-    // Leaflet measures its container once, at creation. On first load that can
-    // happen before the flex layout settles, leaving tiles stuck in a corner
-    // until something forces a recalc. A ResizeObserver invalidates on every
-    // real size change — the initial 0→full sizing included — so the map is
-    // correct without depending on a guessed timeout. (invalidateSize doesn't
-    // change the observed element's own box, so this can't loop.)
-    new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById('map'));
+  ensureMap(); // draw the map immediately; pins arrive next
+  let points, total, truncated;
+  try {
+    ({ points, total, truncated } = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(filter) })).json());
+  } catch {
+    // Transient server-busy hiccup — the map still shows; retry shortly.
+    $('mapHint').textContent = 'Loading places… (the app is busy scraping; retrying)';
+    setTimeout(() => runMapQuery(filter), 4000);
+    return;
   }
   if (mapLayer) map.removeLayer(mapLayer);
   // Clusters keep 30k pins readable zoomed out; up close, individual pins win.
@@ -1085,7 +1105,11 @@ async function refreshCoverage() {
     autoRun = data.auto;
     renderCoverage(data);
     renderEnrichIdle(data.contact);
-  } catch { /* board is decorative; a failed refresh just keeps the last one */ }
+  } catch {
+    // Server momentarily busy scraping — retry so the board doesn't sit on
+    // "Loading…" forever after a hiccup on first paint.
+    if ($('coverageBoard').textContent.includes('Loading')) setTimeout(refreshCoverage, 4000);
+  }
 }
 
 function renderCoverage(data) {

@@ -16,10 +16,10 @@
  * the times that IP shouldn't be busy — a hotspot, a metered connection.
  */
 
-import { enrichPlaces } from '../../../packages/engine/src/enrich/enrich.ts';
+import { enrichPlaces, type CrawlOutcome } from '../../../packages/engine/src/enrich/enrich.ts';
 import { PlaceDatabase } from '../../../packages/engine/src/store/database.ts';
 import type { EnrichedPlace } from '../../../packages/engine/src/schema.ts';
-import { DATABASE_PATH } from './extraction.ts';
+import { DATABASE_PATH, listExtractions } from './extraction.ts';
 
 export interface EnrichmentState {
   status: 'running' | 'paused' | 'idle';
@@ -100,14 +100,35 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
 
       const checkedBefore = state.checked;
       const foundBefore = state.found;
-      const enriched = await enrichPlaces(places, { concurrency: 14 }, (p) => {
-        state.checked = checkedBefore + p.done;
-        state.found = foundBefore + p.withEmail;
-        publish();
-      });
+
+      // A running extraction pulls its traffic through this same connection.
+      // Crawling business sites flat-out alongside it starves both: enrichment
+      // fetches time out en masse and sites get written off as unreachable.
+      // (Measured: ~60% hit rate on a quiet line vs ~19% lifetime with the old
+      // one-shot marking.) Under load, drop concurrency and stretch the timeout.
+      const extracting = listExtractions().some((x) => x.status === 'running' || x.status === 'starting');
+      const outcomes: CrawlOutcome[] = [];
+      const enriched = await enrichPlaces(
+        places,
+        {
+          concurrency: extracting ? 4 : 14,
+          perSiteTimeoutMs: extracting ? 20_000 : 12_000,
+          outcomes,
+        },
+        (p) => {
+          state.checked = checkedBefore + p.done;
+          state.found = foundBefore + p.withEmail;
+          publish();
+        },
+      );
 
       db.upsertMany(enriched);
-      db.markEmailChecked(ids);
+      // Reached sites are settled — an email was there or it wasn't. Unreachable
+      // ones defer and retry with backoff; a timeout is not "no email".
+      const reachedIds = ids.filter((_, i) => outcomes[i] !== 'unreachable');
+      const unreachableIds = ids.filter((_, i) => outcomes[i] === 'unreachable');
+      db.markEmailChecked(reachedIds);
+      db.markEmailDeferred(unreachableIds);
       state.checked = checkedBefore + ids.length;
       state.found = foundBefore + enriched.filter((p) => p.email_1).length;
       state.pending = Math.max(0, state.pending - ids.length);

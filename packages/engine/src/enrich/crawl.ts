@@ -40,7 +40,12 @@ async function fetchPage(url: string, options: CrawlOptions): Promise<{ html: st
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   try {
     const res = await undiciFetch(url, {
-      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
+      headers: {
+        'User-Agent': USER_AGENT,
+        Accept: 'text/html,application/xhtml+xml',
+        // A real browser always sends one; its absence is a cheap bot tell.
+        'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
+      },
       signal,
       redirect: 'follow',
       ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
@@ -150,7 +155,22 @@ export async function crawlSite(site: string, options: CrawlOptions = {}): Promi
   let fetched = 1;
 
   const maxExtra = options.maxExtraPages ?? 2;
-  for (const link of contactLinks(home.html, home.finalUrl).slice(0, maxExtra)) {
+  const candidates = contactLinks(home.html, home.finalUrl);
+
+  // A JS-rendered site (Wix, Squarespace, most builders) serves a homepage
+  // whose nav only exists after scripts run, so link discovery comes up empty
+  // even though /contact is right there. Probe the conventional paths directly
+  // — a 404 costs one cheap request; a hit is where the email usually lives.
+  if (candidates.length === 0) {
+    try {
+      const origin = new URL(home.finalUrl).origin;
+      candidates.push(`${origin}/contact`, `${origin}/contact-us`, `${origin}/about`);
+    } catch {
+      // finalUrl unparsable; homepage HTML is all we get.
+    }
+  }
+
+  for (const link of candidates.slice(0, maxExtra)) {
     if (options.signal?.aborted) break;
     const page = await fetchPage(link, options);
     if (page) {

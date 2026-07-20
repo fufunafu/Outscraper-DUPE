@@ -208,6 +208,63 @@ describe('PlaceDatabase', () => {
     }
   });
 
+  it('defers unreachable sites with backoff instead of writing them off', () => {
+    const { db, path } = freshDb();
+    try {
+      db.upsert(place({ cid: '1', name: 'Flaky', site: 'flaky.com' }));
+      const [id] = db.nextEmailTargets();
+      assert.ok(id);
+
+      // First failure: retry in ~1h — hidden now, visible after the backoff.
+      const t0 = Date.now();
+      db.markEmailDeferred([id!], t0);
+      assert.deepEqual(db.nextEmailTargets(200, t0), [], 'deferred rows hide until retry time');
+      assert.deepEqual(db.nextEmailTargets(200, t0 + 3_600_001), [id], 'visible after 1h backoff');
+      assert.equal(db.pendingEmailChecks(), 1, 'deferred still counts as pending');
+
+      // Second failure: retry in ~6h.
+      db.markEmailDeferred([id!], t0);
+      assert.deepEqual(db.nextEmailTargets(200, t0 + 3_600_001), [], 'second failure backs off longer');
+      assert.deepEqual(db.nextEmailTargets(200, t0 + 21_600_001), [id]);
+
+      // Third failure: written off — marked checked, out of the queue for good.
+      db.markEmailDeferred([id!], t0);
+      assert.deepEqual(db.nextEmailTargets(200, t0 + 999_999_999), []);
+      assert.equal(db.pendingEmailChecks(), 0);
+    } finally {
+      db.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
+  it('re-queues checked-but-emailless rows exactly once (recheck migration)', () => {
+    const { db, path } = freshDb();
+    try {
+      db.upsertMany([
+        place({ cid: '1', name: 'Missed', site: 'a.com' }),
+        place({ cid: '2', name: 'Found', site: 'b.com', email_1: 'x@b.com' }),
+      ]);
+      db.markEmailChecked(db.nextEmailTargets());
+      assert.equal(db.pendingEmailChecks(), 0);
+      db.close();
+
+      // Reopen: guard key already set by the first migration, so nothing re-queues.
+      const db2 = new PlaceDatabase(path);
+      try {
+        assert.equal(db2.pendingEmailChecks(), 0, 'recheck migration must not re-run');
+        assert.equal(db2.getSetting('emailRecheckV2'), 'done');
+      } finally {
+        db2.close();
+      }
+    } finally {
+      rmSync(path, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+    }
+  });
+
   it('summarises completed passes as coverage', () => {
     const { db, path } = freshDb();
     try {

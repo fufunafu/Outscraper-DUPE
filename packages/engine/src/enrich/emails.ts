@@ -77,16 +77,34 @@ function collectPlainText(html: string, into: Set<string>): void {
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    // " at " obfuscations are common; normalise the cheap ones. Quantifiers
-    // here are BOUNDED on purpose: unbounded \s* flanking optional tokens let
-    // the engine try every split of a long whitespace run — catastrophic
-    // backtracking that froze the whole app on a real-world page. Nobody
-    // obfuscates an email with five spaces.
+    // " at " / " dot " obfuscations are common; normalise the cheap ones.
+    // Quantifiers here are BOUNDED on purpose: unbounded \s* flanking optional
+    // tokens let the engine try every split of a long whitespace run —
+    // catastrophic backtracking that froze the whole app on a real-world page.
+    // Nobody obfuscates an email with five spaces.
     .replace(/\(\s{0,4}at\s{0,4}\)|\[\s{0,4}at\s{0,4}\]|＠/gi, '@')
+    .replace(/\(\s{0,4}dot\s{0,4}\)|\[\s{0,4}dot\s{0,4}\]/gi, '.')
     .replace(/[ \t]{1,4}@[ \t]{1,4}/g, '@')
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
   for (const match of text.matchAll(EMAIL_RE)) {
     if (isPlausible(match[0])) into.add(match[0].toLowerCase());
+  }
+}
+
+/**
+ * Emails declared in structured data or plain JS config: JSON-LD LocalBusiness
+ * blocks (`"email": "info@acme.com"`) are how site builders like Wix and
+ * Squarespace expose contact details — often the ONLY place the address exists
+ * server-side, since the visible page renders it with JavaScript we never run.
+ * The plain-text pass strips <script> tags on purpose, so this looks at the
+ * raw HTML; the quoted-"email"-key shape keeps tracking IDs out.
+ */
+function collectStructured(html: string, into: Set<string>): void {
+  for (const match of html.matchAll(/"email"\s*:\s*"(?:mailto:)?([^"\\]{3,254})"/gi)) {
+    const email = match[1]!.trim();
+    if (isPlausible(email) && EMAIL_RE.test(email)) into.add(email.toLowerCase());
+    EMAIL_RE.lastIndex = 0; // .test on a /g regex is stateful; reset between uses
   }
 }
 
@@ -139,6 +157,7 @@ export function extractEmails(html: string, siteUrl: string | null): RankedEmail
   const found = new Set<string>();
   collectCfEmails(capped, found);
   collectMailto(capped, found);
+  collectStructured(capped, found);
   collectPlainText(capped, found);
   return { emails: rankEmails(found, domainOf(siteUrl)) };
 }
