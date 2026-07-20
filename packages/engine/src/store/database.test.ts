@@ -136,7 +136,7 @@ describe('PlaceDatabase', () => {
       assert.equal(points[0]!.name, 'NeedsEmail');
       assert.equal(points[0]!.lat, 49.3);
       // Contactability rollup.
-      assert.deepEqual(db.contactStats(), { total: 3, withEmail: 1, withSite: 2, withPhone: 0 });
+      assert.deepEqual(db.contactStats(), { total: 3, withEmail: 1, withSite: 2, withPhone: 0, checked: 0 });
     } finally {
       db.close();
       rmSync(path, { force: true });

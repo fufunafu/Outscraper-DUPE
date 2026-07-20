@@ -333,19 +333,21 @@ export class PlaceDatabase {
   }
 
   /** Contactability at a glance: how much of the database is actionable as leads. */
-  contactStats(): { total: number; withEmail: number; withSite: number; withPhone: number } {
+  contactStats(): { total: number; withEmail: number; withSite: number; withPhone: number; checked: number } {
     const row = this.#db
       .prepare(`SELECT COUNT(*) AS total,
                        SUM(CASE WHEN email_1 IS NOT NULL AND email_1 != '' THEN 1 ELSE 0 END) AS withEmail,
                        SUM(CASE WHEN site IS NOT NULL AND site != '' THEN 1 ELSE 0 END) AS withSite,
-                       SUM(CASE WHEN phone IS NOT NULL AND phone != '' THEN 1 ELSE 0 END) AS withPhone
+                       SUM(CASE WHEN phone IS NOT NULL AND phone != '' THEN 1 ELSE 0 END) AS withPhone,
+                       SUM(CASE WHEN email_checked_at IS NOT NULL THEN 1 ELSE 0 END) AS checked
                 FROM places`)
-      .get() as { total: number; withEmail: number | null; withSite: number | null; withPhone: number | null };
+      .get() as { total: number; withEmail: number | null; withSite: number | null; withPhone: number | null; checked: number | null };
     return {
       total: row.total,
       withEmail: row.withEmail ?? 0,
       withSite: row.withSite ?? 0,
       withPhone: row.withPhone ?? 0,
+      checked: row.checked ?? 0,
     };
   }
 

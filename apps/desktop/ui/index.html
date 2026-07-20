@@ -1209,7 +1209,12 @@ function renderEnrichment() {
 
   const total = s.checked + s.pending;
   const pct = total ? Math.round(100 * s.checked / total) : 100;
-  const rate = s.checked ? Math.round(100 * s.found / s.checked) : 0;
+  // All-time hit rate (emails in DB / sites ever checked) — stable across app
+  // restarts, unlike the per-session found/checked which resets to 0 and can
+  // read a scary "2%" mid-run on a low-yield batch (e.g. chain stores).
+  const allTimeHit = enrichContact && enrichContact.checked
+    ? Math.round(100 * enrichContact.withEmail / enrichContact.checked)
+    : null;
   let speed = '';
   if (enrichSamples.length >= 2) {
     const first = enrichSamples[0], last = enrichSamples[enrichSamples.length - 1];
@@ -1222,7 +1227,7 @@ function renderEnrichment() {
   $('enrichStatus').innerHTML = `
     ${s.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
     <div class="meta"><b>${s.pending.toLocaleString()}</b> waiting${speed}</div>
-    <div class="meta" style="margin-top:2px"><b>${s.checked.toLocaleString()}</b> checked${s.checked ? ` · ${rate}% hit` : ''}${enrichContact ? ` · <b>${enrichContact.withEmail.toLocaleString()}</b> emails total` : ''}</div>`;
+    <div class="meta" style="margin-top:2px">${enrichContact ? `<b>${enrichContact.withEmail.toLocaleString()}</b> emails found${allTimeHit != null ? ` · ${allTimeHit}% of sites checked` : ''}` : `<b>${s.checked.toLocaleString()}</b> checked`}</div>`;
   $('enrichPauseBtn').textContent = s.status === 'paused' ? 'Resume' : 'Pause';
 }
 
