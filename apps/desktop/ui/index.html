@@ -53,6 +53,18 @@
   .pop { position:absolute; z-index:40; background:var(--card); border:1px solid var(--line);
     border-radius:var(--radius); box-shadow:var(--shadow); max-height:340px; overflow:auto; min-width:280px; }
   .pop[hidden] { display:none; }
+  /* Row detail drawer: full record for one place, slid in from the right. */
+  .drawer-backdrop { position:fixed; inset:0; z-index:69; background:rgba(10,16,30,.18); }
+  .drawer { position:fixed; top:0; right:0; bottom:0; width:min(430px,92vw); background:var(--card);
+    border-left:1px solid var(--line); box-shadow:var(--shadow); z-index:70; overflow:auto; padding:24px; }
+  .drawer h3 { margin:0 0 2px; font-size:17px; }
+  .drawer .close { position:absolute; top:14px; right:14px; border:0; background:transparent;
+    color:var(--muted); font-size:20px; cursor:pointer; line-height:1; padding:4px; }
+  .drawer dl { display:grid; grid-template-columns:110px 1fr; gap:7px 12px; margin:14px 0 0; font-size:13.5px; }
+  .drawer dt { color:var(--muted); }
+  .drawer dd { margin:0; overflow-wrap:anywhere; }
+  .drawer dd a { color:var(--accent); }
+  .drawer .copyable { cursor:copy; color:var(--accent); }
   .combo { position:relative; }
   .combo input { padding-right:34px; text-overflow:ellipsis; }
   .combo-caret { position:absolute; right:6px; top:50%; transform:translateY(-50%); border:0;
@@ -228,6 +240,10 @@
     <div class="card">
       <h1><span class="dot">▦</span> Your database <span id="dbCount" class="status" style="margin-left:8px"></span></h1>
       <p class="sub">Every business found so far, live on the map. The filters below narrow both the map and the table.</p>
+      <div id="dbEmptyHint" class="banner" hidden style="background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent)">
+        <b>Start here:</b> your database is empty. Scroll down to <b>Build one region manually</b> (pick a vertical and province, press Build),
+        or press <b>Auto-build</b> in the coverage board to work through every region for you. Every business found lands here permanently — search it, map it, export it.
+      </div>
       <div id="coverageError"></div>
       <div class="ovgrid">
         <div>
@@ -900,6 +916,8 @@ async function refreshDbStats() {
     return;
   }
   $('dbCount').textContent = `${s.count.toLocaleString()} places`;
+  // First-run pointer: an empty database gives no clue where to begin.
+  $('dbEmptyHint').hidden = s.count > 0;
   if (s.contact) renderEnrichIdle(s.contact);
   catMulti.setData(s.categories);
   stateMulti.setData(s.states);
@@ -944,15 +962,16 @@ async function runTableQuery() {
     return `<td>${shown}</td>`;
   };
   const last = Math.min(qOffset + places.length, matched ?? places.length);
+  lastTablePlaces = places;
   $('queryResults').innerHTML = places.length ? `<div class="tablewrap"><table>
     <thead><tr>${cols.map(c=>`<th ${SORTABLE_COLS.has(c) ? `data-sort="${c}" style="cursor:pointer"` : ''}>${heading(c)}${arrow(c)}</th>`).join('')}</tr></thead>
-    <tbody>${places.map(p=>`<tr>${cols.map(c=>cell(p,c)).join('')}</tr>`).join('')}</tbody>
+    <tbody>${places.map((p,i)=>`<tr data-row="${i}" style="cursor:pointer">${cols.map(c=>cell(p,c)).join('')}</tr>`).join('')}</tbody>
   </table></div>
   <div class="actions" style="align-items:center">
     <button class="ghost" data-page="-1" ${qOffset === 0 ? 'disabled' : ''}>‹ Prev</button>
     <span class="meta">rows ${(qOffset+1).toLocaleString()}–${last.toLocaleString()} of ${(matched ?? 0).toLocaleString()} matching</span>
     <button class="ghost" data-page="1" ${last >= (matched ?? 0) ? 'disabled' : ''}>Next ›</button>
-    <span class="hint" style="margin-left:auto">Click a column to sort · click an email or phone to copy</span>
+    <span class="hint" style="margin-left:auto">Click a row for details · a column to sort · an email or phone to copy</span>
   </div>`
    : `<p class="empty">No matches. ${count?'':'Build a database first.'}</p>`;
 }
@@ -979,8 +998,86 @@ $('queryResults').onclick = async (e) => {
       copyCell.textContent = '✓ copied';
       setTimeout(() => { copyCell.textContent = original; }, 800);
     } catch { /* clipboard unavailable; nothing to do */ }
+    return; // a copy click shouldn't also open the drawer
   }
+  const row = e.target.closest('tr[data-row]');
+  if (row && lastTablePlaces[+row.dataset.row]) openDrawer(lastTablePlaces[+row.dataset.row]);
 };
+
+/* ---- Row detail drawer: the full record, since table cells truncate ---- */
+let lastTablePlaces = [];
+
+function drawerField(label, value, { copy = false, link = false } = {}) {
+  if (value == null || value === '' || value === 'unfindable') return '';
+  const shown = esc(String(value));
+  const body = link ? `<a href="${shown}" target="_blank" rel="noopener">${shown}</a>`
+    : copy ? `<span class="copyable" data-copy="${shown}" title="Click to copy">${shown}</span>`
+    : shown;
+  return `<dt>${label}</dt><dd>${body}</dd>`;
+}
+
+function openDrawer(p) {
+  closeDrawer();
+  const hours = p.working_hours
+    ? Object.entries(p.working_hours).map(([d, h]) => `${esc(d)}: ${esc(h)}`).join('<br>')
+    : null;
+  const socials = ['facebook','instagram','linkedin','twitter','youtube','tiktok']
+    .filter((k) => p[k])
+    .map((k) => `<a href="${esc(p[k])}" target="_blank" rel="noopener">${k}</a>`)
+    .join(' · ');
+  const backdrop = document.createElement('div');
+  backdrop.className = 'drawer-backdrop';
+  backdrop.id = 'drawerBackdrop';
+  const el = document.createElement('aside');
+  el.className = 'drawer';
+  el.id = 'drawer';
+  el.innerHTML = `
+    <button class="close" aria-label="Close">×</button>
+    <h3>${esc(p.name ?? 'Unnamed place')}</h3>
+    <div class="meta">${esc([p.category, p.city, p.state].filter(Boolean).join(' · '))}</div>
+    ${p.rating != null ? `<div class="meta" style="margin-top:4px">★ ${p.rating}${p.reviews != null ? ` · ${Number(p.reviews).toLocaleString()} reviews` : ''}</div>` : ''}
+    <dl>
+      ${drawerField('Address', p.full_address)}
+      ${drawerField('Phone', p.phone, { copy: true })}
+      ${drawerField('Email', p.email_1, { copy: true })}
+      ${drawerField('Email 2', p.email_2, { copy: true })}
+      ${drawerField('Email 3', p.email_3, { copy: true })}
+      ${drawerField('Website', p.site, { link: true })}
+      ${socials ? `<dt>Socials</dt><dd>${socials}</dd>` : ''}
+      ${hours ? `<dt>Hours</dt><dd>${hours}</dd>` : ''}
+      ${drawerField('Status', p.business_status)}
+      ${drawerField('Found via', p.query)}
+    </dl>
+    ${p.latitude != null && p.longitude != null ? `<div class="actions" style="margin-top:16px"><button class="ghost" id="drawerMapBtn">Show on map</button></div>` : ''}`;
+  document.body.append(backdrop, el);
+
+  backdrop.onclick = closeDrawer;
+  el.querySelector('.close').onclick = closeDrawer;
+  el.onclick = async (ev) => {
+    const c = ev.target.closest('.copyable');
+    if (!c) return;
+    try {
+      await navigator.clipboard.writeText(c.dataset.copy);
+      const original = c.textContent;
+      c.textContent = '✓ copied';
+      setTimeout(() => { c.textContent = original; }, 800);
+    } catch { /* clipboard unavailable */ }
+  };
+  const mapBtn = el.querySelector('#drawerMapBtn');
+  if (mapBtn) mapBtn.onclick = () => {
+    closeDrawer();
+    if (map) {
+      map.setView([p.latitude, p.longitude], 15);
+      $('map').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  };
+}
+
+function closeDrawer() {
+  $('drawer')?.remove();
+  $('drawerBackdrop')?.remove();
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
 
 /* Category → colour: stable hash into a fixed palette, so the same trade is
    the same colour on every load without anyone maintaining a mapping. */
@@ -1078,9 +1175,9 @@ $('leadsBtn').onclick = async () => {
   $('leadsBtn').disabled = true; $('leadsBtn').textContent = 'Building lead list…';
   try {
     const label = [...catMulti.values(), ...stateMulti.values(), ...cityMulti.values()].slice(0, 3).join('-') || 'all';
-    const { path, rows } = await (await fetch('/api/database/export-leads', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
+    const { path, rows, dropped } = await (await fetch('/api/database/export-leads', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
     await fetch('/api/reveal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
-    $('leadsBtn').textContent = `${rows.toLocaleString()} leads exported ✓`;
+    $('leadsBtn').textContent = `${rows.toLocaleString()} leads exported ✓${dropped ? ` (${dropped} dead-domain drops)` : ''}`;
   } catch { $('leadsBtn').textContent = 'Export failed'; }
   finally { $('leadsBtn').disabled = false; setTimeout(()=>{$('leadsBtn').textContent='Export lead list (.xlsx)';}, 3000); }
 };
