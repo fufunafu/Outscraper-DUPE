@@ -194,7 +194,7 @@ async function run(
     // concurrency is bounded by the pool size, not by politeness. Each scrape
     // then uses a modest internal concurrency, since the parallel units already
     // fill the pool.
-    const unitConcurrency = Math.max(4, Math.min(24, Math.round(egress.size / 6)));
+    const unitConcurrency = Math.max(4, Math.min(48, Math.round(egress.size / 6)));
     const perScrapeConcurrency = Math.max(3, Math.round((egress.size * 1.5) / unitConcurrency));
 
     let cellsTotal = 0;

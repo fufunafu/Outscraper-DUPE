@@ -42,12 +42,16 @@ const TEMPLATE = `# Places Scraper — proxy list
 
 function parseProxyLines(text: string): string[] {
   return text
+    // Proxy lists pasted from Windows exports carry \r; scrub before parsing.
+    .replace(/\r/g, '')
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'))
     // A line may itself be a comma-separated list, so flatten those too.
     .flatMap((line) => line.split(',').map((s) => s.trim()))
-    .filter((entry) => /^https?:\/\//i.test(entry) || /^socks5?:\/\//i.test(entry));
+    .filter((entry) => /^https?:\/\//i.test(entry) || /^socks5?:\/\//i.test(entry))
+    // One malformed line must not crash the whole app at boot.
+    .filter((entry) => URL.canParse(entry));
 }
 
 /**
