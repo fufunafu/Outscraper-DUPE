@@ -267,6 +267,44 @@ async function run(
 }
 
 /**
+ * Export an outreach-ready lead list: the current filter, restricted to places
+ * with an email, deduplicated by email (a franchise listing five branches with
+ * one inbox becomes one row — nobody wants to email the same address five
+ * times), trimmed to the columns a cold-outreach sheet actually uses, as .xlsx.
+ */
+export async function exportLeads(
+  filter: import('../../../packages/engine/src/store/database.ts').PlaceQuery,
+  label: string,
+): Promise<{ path: string; rows: number }> {
+  const { toXlsx } = await import('../../../packages/engine/src/export/xlsx.ts');
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const db = openDatabase();
+  try {
+    const seen = new Set<string>();
+    const rows: Record<string, unknown>[] = [];
+    // Ordered most-reviewed first, so the kept row per email is the flagship.
+    for (const p of db.iterate({ ...filter, hasEmail: true, sort: 'reviews', dir: 'desc' })) {
+      const email = (p.email_1 ?? '').toLowerCase();
+      if (!email || seen.has(email)) continue;
+      seen.add(email);
+      rows.push({
+        name: p.name, category: p.category, city: p.city, state: p.state,
+        phone: p.phone, email: p.email_1, website: p.site,
+        address: p.full_address, rating: p.rating, reviews: p.reviews,
+      });
+    }
+    await mkdir(OUTPUT_DIR, { recursive: true });
+    const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'leads';
+    const date = new Date().toISOString().slice(0, 10);
+    const path = join(OUTPUT_DIR, `leads-${slug}-${date}.xlsx`);
+    await writeFile(path, toXlsx(rows, ['name', 'category', 'city', 'state', 'phone', 'email', 'website', 'address', 'rating', 'reviews']));
+    return { path, rows: rows.length };
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Export a slice of the database to a CSV, returning its path. Streams from the
  * DB so a 60k-row export never holds the whole dataset in memory at once.
  */

@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Places Scraper</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js" defer></script>
 <style>
   :root {
     --bg:#eef2fb; --card:#fff; --ink:#1a2233; --muted:#6b7688; --line:#dfe4ee;
@@ -229,6 +232,7 @@
       <div class="ovgrid">
         <div>
           <div id="map"></div>
+          <div id="mapLegend" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:12px"></div>
           <p class="hint" id="mapHint"></p>
         </div>
         <div class="ovside">
@@ -280,6 +284,7 @@
       <div class="actions" style="margin-top:16px">
         <button class="primary" id="queryBtn">Search</button>
         <button class="ghost" id="exportBtn">Export all matches to CSV</button>
+        <button class="ghost" id="leadsBtn" title="Only rows with an email, deduplicated by email — ready for outreach">Export lead list (.xlsx)</button>
       </div>
       <div id="queryResults"></div>
     </div>
@@ -887,16 +892,63 @@ function buildQuery() {
 /* ---- Table & map views of query results ---- */
 let map = null, mapLayer = null;
 
+/* Table state: server-side sort + pagination. */
+let qSort = 'reviews', qDir = 'desc', qOffset = 0;
+const PAGE = 200;
+const SORTABLE_COLS = new Set(['name','category','city','rating','reviews']);
+
 async function runTableQuery() {
-  const { places, count } = await (await fetch('/api/database/query', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildQuery()) })).json();
+  const body = { ...buildQuery(), limit: PAGE, offset: qOffset };
+  const { places, count, matched } = await (await fetch('/api/database/query', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })).json();
   const cols = ['name','category','city','full_address','phone','email_1','site','rating','reviews'];
   const heading = (c) => c === 'email_1' ? 'email' : c === 'full_address' ? 'address' : c;
+  const arrow = (c) => qSort === c ? (qDir === 'desc' ? ' ↓' : ' ↑') : '';
+  const cell = (p, c) => {
+    const raw = p[c] == null ? '' : String(p[c]);
+    const shown = esc(raw).slice(0, 50);
+    // Email and phone copy on click — the single most common thing done with a row.
+    if ((c === 'email_1' || c === 'phone') && raw)
+      return `<td data-copy="${esc(raw)}" title="Click to copy" style="cursor:copy;color:var(--accent)">${shown}</td>`;
+    return `<td>${shown}</td>`;
+  };
+  const last = Math.min(qOffset + places.length, matched ?? places.length);
   $('queryResults').innerHTML = places.length ? `<div class="tablewrap"><table>
-    <thead><tr>${cols.map(c=>`<th>${heading(c)}</th>`).join('')}</tr></thead>
-    <tbody>${places.map(p=>`<tr>${cols.map(c=>`<td>${p[c]==null?'':esc(String(p[c])).slice(0,50)}</td>`).join('')}</tr>`).join('')}</tbody>
-  </table></div><p class="hint">Showing ${places.length} matches (of ${count.toLocaleString()} in database). Export gets them all.</p>`
+    <thead><tr>${cols.map(c=>`<th ${SORTABLE_COLS.has(c) ? `data-sort="${c}" style="cursor:pointer"` : ''}>${heading(c)}${arrow(c)}</th>`).join('')}</tr></thead>
+    <tbody>${places.map(p=>`<tr>${cols.map(c=>cell(p,c)).join('')}</tr>`).join('')}</tbody>
+  </table></div>
+  <div class="actions" style="align-items:center">
+    <button class="ghost" data-page="-1" ${qOffset === 0 ? 'disabled' : ''}>‹ Prev</button>
+    <span class="meta">rows ${(qOffset+1).toLocaleString()}–${last.toLocaleString()} of ${(matched ?? 0).toLocaleString()} matching</span>
+    <button class="ghost" data-page="1" ${last >= (matched ?? 0) ? 'disabled' : ''}>Next ›</button>
+    <span class="hint" style="margin-left:auto">Click a column to sort · click an email or phone to copy</span>
+  </div>`
    : `<p class="empty">No matches. ${count?'':'Build a database first.'}</p>`;
 }
+
+$('queryResults').onclick = async (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (th) {
+    const col = th.dataset.sort;
+    qDir = qSort === col && qDir === 'desc' ? 'asc' : 'desc';
+    qSort = col;
+    qOffset = 0;
+    return runTableQuery();
+  }
+  const pager = e.target.closest('button[data-page]');
+  if (pager) {
+    qOffset = Math.max(0, qOffset + Number(pager.dataset.page) * PAGE);
+    return runTableQuery();
+  }
+  const copyCell = e.target.closest('td[data-copy]');
+  if (copyCell) {
+    try {
+      await navigator.clipboard.writeText(copyCell.dataset.copy);
+      const original = copyCell.textContent;
+      copyCell.textContent = '✓ copied';
+      setTimeout(() => { copyCell.textContent = original; }, 800);
+    } catch { /* clipboard unavailable; nothing to do */ }
+  }
+};
 
 async function runMapQuery() {
   if (!window.L) { $('mapHint').textContent = 'Map library could not load — check your internet connection.'; return; }
@@ -930,7 +982,18 @@ async function runMapQuery() {
 }
 
 // The map and the table are two views of the same filter; keep them in step.
-$('queryBtn').onclick = () => { runTableQuery(); runMapQuery(); };
+$('queryBtn').onclick = () => { qOffset = 0; runTableQuery(); runMapQuery(); };
+
+$('leadsBtn').onclick = async () => {
+  $('leadsBtn').disabled = true; $('leadsBtn').textContent = 'Building lead list…';
+  try {
+    const label = [catCombo.value(), cityCombo.value()].filter(Boolean).join('-') || 'all';
+    const { path, rows } = await (await fetch('/api/database/export-leads', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: buildQuery(), label }) })).json();
+    await fetch('/api/reveal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
+    $('leadsBtn').textContent = `${rows.toLocaleString()} leads exported ✓`;
+  } catch { $('leadsBtn').textContent = 'Export failed'; }
+  finally { $('leadsBtn').disabled = false; setTimeout(()=>{$('leadsBtn').textContent='Export lead list (.xlsx)';}, 3000); }
+};
 
 $('exportBtn').onclick = async () => {
   $('exportBtn').disabled = true; $('exportBtn').textContent = 'Exporting…';

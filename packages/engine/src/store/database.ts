@@ -48,9 +48,15 @@ export interface PlaceQuery {
   minReviews?: number;
   /** Free-text match against name. */
   search?: string;
+  /** Sort column (whitelisted; defaults to reviews) and direction. */
+  sort?: string;
+  dir?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
 }
+
+/** Columns the UI may sort by — a whitelist, since they interpolate into SQL. */
+const SORTABLE = new Set(['name', 'category', 'city', 'state', 'rating', 'reviews', 'first_seen', 'last_seen']);
 
 /** A map pin: position plus just enough to label it. */
 export interface GeoPoint {
@@ -250,10 +256,12 @@ export class PlaceDatabase {
     const { clause, params } = this.#where(filter);
     const limit = filter.limit ?? 1000;
     const offset = filter.offset ?? 0;
+    const sortCol = filter.sort && SORTABLE.has(filter.sort) ? filter.sort : 'reviews';
+    const dir = filter.dir === 'asc' ? 'ASC' : 'DESC';
 
     const rows = this.#db
       .prepare(`SELECT id, first_seen, last_seen, data FROM places ${clause}
-                ORDER BY reviews DESC NULLS LAST LIMIT ${limit} OFFSET ${offset}`)
+                ORDER BY ${sortCol} ${dir} NULLS LAST LIMIT ${limit} OFFSET ${offset}`)
       .all(params) as { id: string; first_seen: number; last_seen: number; data: string }[];
 
     return rows.map((r) => ({

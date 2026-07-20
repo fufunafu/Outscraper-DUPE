@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { COUNTRIES } from '../../../packages/engine/src/locations.ts';
+import { notify } from './notify.ts';
 import {
   awaitExtraction, cancelExtraction, getExtraction, openDatabase, startExtraction,
   type Extraction,
@@ -33,6 +34,8 @@ export interface CoverageRun {
   regionsDone: number;
   /** Regions whose extraction failed (kept going; they stay least-covered for next time). */
   failures: number;
+  /** Which full sweep of all regions this is — each cycle is one more pass everywhere. */
+  cycle: number;
   current?: { country: string; region: string };
   currentExtractionId?: string;
 }
@@ -123,12 +126,38 @@ export function startCoverage(
     regionsTotal: allRegions().length,
     regionsDone: 0,
     failures: 0,
+    cycle: 1,
   };
   active = run;
   stopped = false;
   persistCampaign(vertical, language);
   void execute(run, onExtraction, onUpdate);
   return run;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Sleep that wakes early when the campaign is stopped. */
+async function pause(ms: number): Promise<void> {
+  for (let waited = 0; waited < ms && !stopped; waited += 1_000) await sleep(1_000);
+}
+
+/** Least-covered first: zero-pass regions always outrank deepening covered ones. */
+function buildQueue(vertical: string): { country: string; region: string }[] {
+  const db = openDatabase();
+  let passesByRegion = new Map<string, number>();
+  try {
+    passesByRegion = new Map(
+      db.coverage()
+        .filter((c) => c.vertical === vertical)
+        .map((c) => [c.region, c.passes]),
+    );
+  } finally {
+    db.close();
+  }
+  return allRegions()
+    .map((r, order) => ({ ...r, order, passes: passesByRegion.get(`${r.country}/${r.region}`) ?? 0 }))
+    .sort((a, b) => a.passes - b.passes || a.order - b.order);
 }
 
 async function execute(
@@ -138,26 +167,9 @@ async function execute(
 ): Promise<void> {
   const publish = () => onUpdate(run);
 
-  // Least-covered first: a region with zero completed passes always outranks
-  // one with any, so a fresh queue run spreads coverage before deepening it.
-  const db = openDatabase();
-  let passesByRegion = new Map<string, number>();
-  try {
-    passesByRegion = new Map(
-      db.coverage()
-        .filter((c) => c.vertical === run.vertical)
-        .map((c) => [c.region, c.passes]),
-    );
-  } finally {
-    db.close();
-  }
-  const queue = allRegions()
-    .map((r, order) => ({ ...r, order, passes: passesByRegion.get(`${r.country}/${r.region}`) ?? 0 }))
-    .sort((a, b) => a.passes - b.passes || a.order - b.order);
-
-  publish();
-
-  const buildOne = async (target: { country: string; region: string }): Promise<boolean> => {
+  const buildOne = async (
+    target: { country: string; region: string },
+  ): Promise<{ ok: boolean; added: number }> => {
     run.current = { country: target.country, region: target.region };
     const extraction = startExtraction(
       { vertical: run.vertical, location: { country: target.country, region: target.region }, language: run.language },
@@ -166,32 +178,65 @@ async function execute(
     run.currentExtractionId = extraction.id;
     publish();
     await awaitExtraction(extraction.id);
-    return getExtraction(extraction.id)?.status !== 'failed';
+    const done = getExtraction(extraction.id);
+    return { ok: done?.status !== 'failed', added: done?.progress.newThisRun ?? 0 };
   };
 
-  const failed: { country: string; region: string }[] = [];
-  for (const target of queue) {
-    if (stopped) break;
-    if (!(await buildOne(target))) { run.failures += 1; failed.push(target); }
-    run.regionsDone += 1;
+  // Perpetual: each cycle adds one pass everywhere, and Google returns a
+  // different sample each time, so every cycle keeps finding businesses the
+  // previous ones missed. Runs until someone presses Stop.
+  for (;;) {
+    const cycleStarted = Date.now();
+    const queue = buildQueue(run.vertical);
+    run.regionsDone = 0;
+    run.failures = 0;
     publish();
+
+    const failed: { country: string; region: string }[] = [];
+    for (const target of queue) {
+      if (stopped) break;
+      const result = await buildOne(target);
+      if (result.ok) {
+        notify('Places Scraper', `${target.country}-${target.region} ${run.vertical} done: +${result.added.toLocaleString()} new`);
+      } else {
+        run.failures += 1;
+        failed.push(target);
+      }
+      run.regionsDone += 1;
+      publish();
+    }
+
+    // One retry round: a transient failure kills that region's extraction, but
+    // its units are checkpointed — a retry resumes the pass and usually lands it.
+    for (const target of failed) {
+      if (stopped) break;
+      if ((await buildOne(target)).ok) run.failures -= 1;
+      else notify('Places Scraper', `${target.country}-${target.region} failed twice — will retry next cycle`);
+      publish();
+    }
+
+    if (stopped) break;
+    notify('Places Scraper', `Cycle ${run.cycle} complete — starting the next pass.`);
+    run.cycle += 1;
+    run.current = undefined;
+    run.currentExtractionId = undefined;
+    publish();
+
+    // Cool-down between cycles. A suspiciously fast or fully-failing cycle
+    // means something is systematically wrong (no proxies, no network) — back
+    // off for an hour instead of hammering in a hot loop.
+    const wholeCycleFailed = run.failures >= run.regionsTotal;
+    const suspiciouslyFast = Date.now() - cycleStarted < 10 * 60_000;
+    await pause(wholeCycleFailed || suspiciouslyFast ? 60 * 60_000 : 60_000);
+    if (stopped) break;
   }
 
-  // One retry round for regions that failed (a transient error mid-region kills
-  // that extraction, but its units are checkpointed — a retry resumes the pass
-  // and usually finishes it). Regions that fail twice wait for the next sweep.
-  for (const target of failed) {
-    if (stopped) break;
-    if (await buildOne(target)) run.failures -= 1;
-    publish();
-  }
-
-  run.status = stopped ? 'cancelled' : 'done';
+  run.status = 'cancelled';
   run.finishedAt = Date.now();
   run.current = undefined;
   run.currentExtractionId = undefined;
-  // A finished sweep or a deliberate stop is a settled state — don't resurrect
-  // it at next boot. Only a crash leaves the campaign record behind.
+  // Stop is deliberate — don't resurrect at next boot. Only a crash leaves the
+  // campaign record behind for auto-resume.
   clearCampaign();
   publish();
 }

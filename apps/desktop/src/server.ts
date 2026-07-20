@@ -6,11 +6,13 @@
  * remote access, and adding either would be pretending otherwise.
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, dirname, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
+import { networkInterfaces } from 'node:os';
+import { randomBytes } from 'node:crypto';
 
 import { cancelJob, getJob, listJobs, startJob, OUTPUT_DIR, type Job } from './jobs.ts';
 import { filterConflicts } from './filters.ts';
@@ -20,7 +22,7 @@ import { loadProxies, PROXY_FILE } from '../../../packages/engine/src/search/pro
 import { COUNTRIES, citySearch, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
 import { verticalNames, verticalTerms } from '../../../packages/engine/src/verticals.ts';
 import {
-  startExtraction, cancelExtraction, listExtractions, openDatabase, exportDatabase,
+  startExtraction, cancelExtraction, listExtractions, openDatabase, exportDatabase, exportLeads,
   type Extraction,
 } from './extraction.ts';
 import {
@@ -294,6 +296,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const { count, source } = await loadProxies();
     return json(res, 200, {
       proxies: count, source, pools: livePools(), check: getProxyCheck(), backup: getBackupInfo(),
+      remote: remote ? { enabled: true, url: remote.url } : { enabled: false },
     });
   }
 
@@ -302,6 +305,20 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     json(res, 200, { ok: true });
     setTimeout(() => process.exit(0), 300);
     return;
+  }
+
+  // --- Remote access (opt-in) ---
+  if (req.method === 'POST' && url.pathname === '/api/remote/enable') {
+    try {
+      return json(res, 200, await enableRemote());
+    } catch (error) {
+      return json(res, 500, { error: (error as Error).message });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/remote/disable') {
+    disableRemote();
+    return json(res, 200, { enabled: false });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/health/check') {
@@ -313,10 +330,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const db = openDatabase();
     try {
       const places = db.query({ ...filter, limit: Math.min(filter.limit ?? 200, 500) });
-      return json(res, 200, { places, count: db.count });
+      return json(res, 200, { places, count: db.count, matched: db.countWhere(filter) });
     } finally {
       db.close();
     }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/database/export-leads') {
+    const body = (await readBody(req)) as { filter?: PlaceQuery; label?: string };
+    const { path, rows } = await exportLeads(body.filter ?? {}, body.label ?? 'leads');
+    return json(res, 200, { path, rows });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/database/export') {
@@ -416,6 +439,78 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (req.method === 'GET') return serveStatic(res, url.pathname);
   res.writeHead(405).end('Method not allowed');
+}
+
+// --- Remote access -------------------------------------------------------------
+//
+// The main server binds loopback only, on purpose. Remote access is a second,
+// explicitly-enabled listener on all interfaces, gated by a random key: the
+// first visit needs ?key=… in the URL (which sets a cookie), and every request
+// without the cookie is refused. Meant for a trusted LAN or a Tailscale
+// network — the UI says so — not for exposure to the open internet.
+
+const REMOTE_PORT = 4318;
+let remote: { server: Server; url: string; key: string } | null = null;
+
+function lanAddress(): string {
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family === 'IPv4' && !a.internal) return a.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+async function enableRemote(): Promise<{ enabled: true; url: string }> {
+  if (remote) return { enabled: true, url: remote.url };
+
+  // A stable key, so the link colleagues saved keeps working across restarts.
+  const db = openDatabase();
+  let key: string;
+  try {
+    key = db.getSetting('remoteKey') ?? randomBytes(6).toString('hex');
+    db.setSetting('remoteKey', key);
+  } finally {
+    db.close();
+  }
+
+  const gate = (req: IncomingMessage, res: ServerResponse): void => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const cookieKey = /(?:^|;\s*)psk=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
+    if (url.searchParams.get('key') === key) {
+      // Key in the URL: set the cookie and redirect to a clean address, so the
+      // secret doesn't linger in the location bar or get copy-pasted around.
+      url.searchParams.delete('key');
+      res.writeHead(302, {
+        'Set-Cookie': `psk=${key}; Path=/; HttpOnly; SameSite=Lax`,
+        Location: url.pathname + url.search,
+      });
+      res.end();
+      return;
+    }
+    if (cookieKey !== key) {
+      res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Places Scraper: open the invite link (with its key) first.');
+      return;
+    }
+    handle(req, res).catch((error) => {
+      if (!res.headersSent) json(res, 500, { error: (error as Error).message });
+      else res.end();
+    });
+  };
+
+  const server = createServer(gate);
+  await new Promise<void>((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(REMOTE_PORT, '0.0.0.0', () => resolve());
+  });
+  remote = { server, key, url: `http://${lanAddress()}:${REMOTE_PORT}/?key=${key}` };
+  return { enabled: true, url: remote.url };
+}
+
+function disableRemote(): void {
+  remote?.server.close();
+  remote = null;
 }
 
 export function startServer(port = 4317): Promise<string> {
