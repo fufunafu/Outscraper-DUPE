@@ -126,6 +126,7 @@
   <div class="tabs-bar" role="tablist">
     <button class="tab" id="tabScrapeBtn" role="tab" aria-selected="true">Quick scrape</button>
     <button class="tab" id="tabDbBtn" role="tab" aria-selected="false">Database</button>
+    <button class="tab" id="tabHealthBtn" role="tab" aria-selected="false">Health</button>
   </div>
 
   <div id="tab-scrape">
@@ -281,6 +282,19 @@
       <div id="mapWrap" hidden style="margin-top:14px"><div id="map"></div><p class="hint" id="mapHint"></p></div>
     </div>
   </div><!-- /tab-database -->
+
+  <div id="tab-health" hidden>
+    <div class="card">
+      <h1 style="font-size:17px"><span class="dot" style="background:var(--ok)">♥</span> Proxy health <span id="healthSummary" class="status" style="margin-left:8px"></span></h1>
+      <p class="sub">Every exit IP the scraper can use. While a run is active you see live per-IP results straight from the run; the test button checks each proxy's connectivity on demand — useful before starting an overnight build.</p>
+      <div class="actions" style="margin-top:0;margin-bottom:16px">
+        <button class="primary" id="healthCheckBtn">Test all proxies</button>
+        <span class="meta" id="healthCheckMeta" style="align-self:center"></span>
+      </div>
+      <div id="healthPools"></div>
+      <div id="healthResults"></div>
+    </div>
+  </div><!-- /tab-health -->
 </div>
 
 <script type="module">
@@ -636,15 +650,19 @@ $('country').onchange = () => { locs.clear(); expanded.clear(); renderLocTokens(
 const extractions = new Map();
 
 // Tabs
+const TABS = { scrape: 'tabScrapeBtn', database: 'tabDbBtn', health: 'tabHealthBtn' };
 $('tabScrapeBtn').onclick = () => switchTab('scrape');
 $('tabDbBtn').onclick = () => switchTab('database');
+$('tabHealthBtn').onclick = () => switchTab('health');
+let currentTab = 'scrape';
 function switchTab(which) {
-  const db = which === 'database';
-  $('tab-scrape').hidden = db;
-  $('tab-database').hidden = !db;
-  $('tabScrapeBtn').setAttribute('aria-selected', String(!db));
-  $('tabDbBtn').setAttribute('aria-selected', String(db));
-  if (db) { refreshDbStats(); refreshCoverage(); }
+  currentTab = which;
+  for (const [name, btnId] of Object.entries(TABS)) {
+    $(`tab-${name}`).hidden = name !== which;
+    $(btnId).setAttribute('aria-selected', String(name === which));
+  }
+  if (which === 'database') { refreshDbStats(); refreshCoverage(); }
+  if (which === 'health') refreshHealth();
 }
 
 // Vertical + region pickers
@@ -910,6 +928,86 @@ $('enrichBtn').onclick = async () => {
   renderEnrichment();
 };
 
+/* ---- Proxy health ---- */
+let healthCheck = null;
+
+async function refreshHealth() {
+  try {
+    const h = await (await fetch('/api/health')).json();
+    healthCheck = h.check;
+    renderHealth(h);
+  } catch { /* transient; keep the last render */ }
+}
+
+function renderHealth(h) {
+  $('healthSummary').textContent = h.proxies
+    ? `${h.proxies} proxies (${h.source})`
+    : 'no proxies — direct connection';
+  $('healthCheckBtn').disabled = healthCheck?.status === 'running' || !h.proxies;
+
+  // Live per-IP stats from active runs — the truest health signal there is.
+  $('healthPools').innerHTML = (h.pools ?? []).map(pool => {
+    const bad = pool.stats.filter(s => s.benchedForMs > 0);
+    const idle = pool.stats.filter(s => !s.successes && !s.failures);
+    return `<div class="job">
+      <div class="head">
+        <div><h3>Live: ${esc(pool.context)}</h3>
+          <div class="meta">${pool.size} IPs in play · ${pool.benched} benched${pool.backoff > 1.2 ? ` · throttled ${pool.backoff.toFixed(1)}×` : ''}${idle.length ? ` · ${idle.length} not yet used` : ''}</div></div>
+        <span class="status ${pool.benched > pool.size / 4 ? 'failed' : 'running'}">${pool.benched > pool.size / 4 ? 'strained' : 'healthy'}</span>
+      </div>
+      <div class="regiongrid">${pool.stats.map(s => {
+        const total = s.successes + s.failures;
+        const cls = s.benchedForMs > 0 ? '' : total === 0 ? '' : s.failures / total > 0.3 ? 'p1' : 'p2';
+        const state = s.benchedForMs > 0 ? `benched ${Math.ceil(s.benchedForMs/1000)}s` : s.warm ? 'warm' : 'cold';
+        return `<span class="rchip ${cls}" style="${s.benchedForMs > 0 ? 'background:color-mix(in srgb,var(--err) 20%,transparent);color:var(--err)' : ''}"
+          title="${esc(s.label)} — ${s.successes} ok, ${s.failures} failed, ${state}">${esc(s.label.split(':')[0])}${total ? ` ${s.successes}/${total}` : ''}</span>`;
+      }).join('')}</div>
+      <p class="hint">Green = mostly succeeding · blue = some failures · red = benched (cooling down after repeated failures). Counts are ok/total requests this run.</p>
+    </div>`;
+  }).join('') || '';
+
+  renderHealthCheck();
+}
+
+function renderHealthCheck() {
+  const c = healthCheck;
+  if (!c) { $('healthCheckMeta').textContent = 'Not tested yet this session.'; $('healthResults').innerHTML = ''; return; }
+  const running = c.status === 'running';
+  $('healthCheckBtn').disabled = running;
+  $('healthCheckMeta').textContent = running
+    ? `Testing… ${c.done}/${c.total}`
+    : `Last test: ${new Date(c.finishedAt ?? c.startedAt).toLocaleTimeString()}`;
+
+  const done = c.results.filter((r, i) => !running || i < c.done || r.ok || r.error);
+  const okCount = c.results.filter(r => r.ok).length;
+  const badRows = c.results.filter(r => !r.ok && r.error);
+  $('healthResults').innerHTML = `
+    ${running ? `<div class="bar"><i style="width:${c.total ? Math.round(100*c.done/c.total) : 0}%"></i></div>` : ''}
+    <div class="stats" style="margin:10px 0 12px">
+      <span><b>${okCount}</b>/${c.total} reachable</span>
+      ${badRows.length ? `<span style="color:var(--err)"><b>${badRows.length}</b> failing</span>` : ''}
+      ${!running && okCount ? `<span>median ${median(c.results.filter(r=>r.ok).map(r=>r.ms)).toLocaleString()} ms</span>` : ''}
+    </div>
+    ${badRows.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>proxy</th><th>problem</th></tr></thead>
+      <tbody>${badRows.map(r => `<tr><td>${esc(r.label)}</td><td style="color:var(--err)">${esc(r.error)}</td></tr>`).join('')}</tbody>
+    </table></div>
+    <p class="hint">Failing proxies usually mean the Webshare list rotated — replace those lines in proxies.txt. The scraper benches them automatically either way.</p>` : ''}
+    ${!running && c.total ? `<div class="regiongrid" style="margin-top:10px">${c.results.map(r =>
+      `<span class="rchip ${r.ok ? 'p2' : ''}" style="${!r.ok ? 'background:color-mix(in srgb,var(--err) 20%,transparent);color:var(--err)' : ''}"
+        title="${esc(r.label)}${r.ok ? ` — ${r.ms} ms` : ` — ${esc(r.error ?? 'untested')}`}">${esc(r.label.split(':')[0])}</span>`).join('')}</div>` : ''}`;
+}
+
+const median = (xs) => { const s = [...xs].sort((a,b)=>a-b); return s.length ? s[Math.floor(s.length/2)] : 0; };
+
+$('healthCheckBtn').onclick = async () => {
+  healthCheck = await (await fetch('/api/health/check', {method:'POST'})).json();
+  renderHealthCheck();
+};
+
+// Live pool numbers move constantly during a run; refresh while watching.
+setInterval(() => { if (currentTab === 'health') refreshHealth(); }, 3000);
+
 const events = new EventSource('/api/events');
 events.onmessage = (e) => {
   const m = JSON.parse(e.data);
@@ -929,6 +1027,7 @@ events.onmessage = (e) => {
   }
   else if (m.type === 'enrichment') { enrichRun = m.enrichment; renderEnrichment(); }
   else if (m.type === 'coverage') { autoRun = m.coverage; refreshCoverage(); }
+  else if (m.type === 'health') { healthCheck = m.check; if (currentTab === 'health') renderHealthCheck(); }
 };
 setInterval(() => {
   if ([...jobs.values()].some((j)=>j.status==='running'||j.status==='starting')) render();

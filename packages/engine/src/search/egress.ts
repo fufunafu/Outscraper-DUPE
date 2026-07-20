@@ -31,6 +31,8 @@ import type { Dispatcher } from 'undici';
 export interface Egress {
   dispatcher: Dispatcher;
   session: GoogleSession;
+  /** Display identity of the exit, e.g. "1.2.3.4:8080" or "direct". */
+  label: string;
 }
 
 interface EgressState extends Egress {
@@ -40,6 +42,21 @@ interface EgressState extends Egress {
   consecutiveFailures: number;
   /** While set in the future, the egress is unhealthy and skipped. */
   cooldownUntil: number;
+  /** Lifetime counters, for the health readout. */
+  successes: number;
+  failures: number;
+}
+
+/** One egress's health, as shown on the health page. */
+export interface EgressStats {
+  label: string;
+  /** Whether its Google session cookie is warmed. */
+  warm: boolean;
+  successes: number;
+  failures: number;
+  consecutiveFailures: number;
+  /** Milliseconds of bench time remaining; 0 when healthy. */
+  benchedForMs: number;
 }
 
 export interface PacingOptions {
@@ -78,6 +95,8 @@ export class EgressPool {
       readyAt: 0,
       consecutiveFailures: 0,
       cooldownUntil: 0,
+      successes: 0,
+      failures: 0,
     }));
   }
 
@@ -92,16 +111,16 @@ export class EgressPool {
       const dispatcher = directDispatcher();
       // Direct egress is a single IP (the operator's own); pace it much more
       // gently, since there is no pool to spread load across.
-      return new EgressPool([{ dispatcher, session: new GoogleSession({ hl, userAgent, dispatcher }) }], {
-        ...opts,
-        baseIntervalMs: Math.max(opts.baseIntervalMs, 1_200),
-      });
+      return new EgressPool(
+        [{ dispatcher, label: 'direct', session: new GoogleSession({ hl, userAgent, dispatcher }) }],
+        { ...opts, baseIntervalMs: Math.max(opts.baseIntervalMs, 1_200) },
+      );
     }
-    const egresses: Egress[] = [];
-    for (let i = 0; i < proxies.size; i++) {
-      const dispatcher = proxies.next();
-      egresses.push({ dispatcher, session: new GoogleSession({ hl, userAgent, dispatcher }) });
-    }
+    const egresses: Egress[] = proxies.entries().map(({ dispatcher, label }) => ({
+      dispatcher,
+      label,
+      session: new GoogleSession({ hl, userAgent, dispatcher }),
+    }));
     return new EgressPool(egresses, opts);
   }
 
@@ -159,6 +178,7 @@ export class EgressPool {
   reportSuccess(egress: Egress): void {
     const state = egress as EgressState;
     state.consecutiveFailures = 0;
+    state.successes += 1;
     // Ease off slowly, so one good response after a block doesn't undo caution.
     this.#backoff = Math.max(1, this.#backoff * 0.97);
   }
@@ -171,6 +191,7 @@ export class EgressPool {
   reportFailure(egress: Egress, options: { pushback: boolean } = { pushback: false }): void {
     const state = egress as EgressState;
     state.consecutiveFailures += 1;
+    state.failures += 1;
     if (state.consecutiveFailures >= this.#opts.failureThreshold) {
       state.cooldownUntil = now() + this.#opts.cooldownMs;
       state.consecutiveFailures = 0;
@@ -184,6 +205,19 @@ export class EgressPool {
   get benched(): number {
     const at = now();
     return this.#egresses.filter((e) => e.cooldownUntil > at).length;
+  }
+
+  /** Per-egress health snapshot, for the health page. */
+  stats(): EgressStats[] {
+    const at = now();
+    return this.#egresses.map((e) => ({
+      label: e.label,
+      warm: e.session.isWarm,
+      successes: e.successes,
+      failures: e.failures,
+      consecutiveFailures: e.consecutiveFailures,
+      benchedForMs: Math.max(0, e.cooldownUntil - at),
+    }));
   }
 
   /**

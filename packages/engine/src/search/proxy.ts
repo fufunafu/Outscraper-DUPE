@@ -37,14 +37,26 @@ export interface ProxyPoolOptions {
  * Oxylabs, Decodo) where every connection already exits from a new IP, or a
  * list of fixed endpoints (Webshare, IPRoyal static) that we round-robin.
  */
+/** A proxy's display identity: host:port, never credentials. */
+export function proxyLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}:${parsed.port || '80'}`;
+  } catch {
+    return 'proxy';
+  }
+}
+
 export class ProxyPool {
   readonly #dispatchers: Dispatcher[];
+  readonly #labels: string[];
   #next = 0;
 
   constructor(options: ProxyPoolOptions) {
     if (options.urls.length === 0) {
       throw new Error('ProxyPool needs at least one proxy URL');
     }
+    this.#labels = options.urls.map(proxyLabel);
     this.#dispatchers = options.urls.map(
       (url) =>
         new ProxyAgent({
@@ -62,6 +74,11 @@ export class ProxyPool {
     const dispatcher = this.#dispatchers[this.#next % this.#dispatchers.length]!;
     this.#next += 1;
     return dispatcher;
+  }
+
+  /** Every proxy with its label, for health checks and per-IP telemetry. */
+  entries(): { dispatcher: Dispatcher; label: string }[] {
+    return this.#dispatchers.map((dispatcher, i) => ({ dispatcher, label: this.#labels[i]! }));
   }
 
   get size(): number {

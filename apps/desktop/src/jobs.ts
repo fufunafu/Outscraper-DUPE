@@ -24,6 +24,7 @@ import { seedBoxes, type SeedBox } from '../../../packages/engine/src/geo/seeds.
 import type { BBox } from '../../../packages/engine/src/geo/tiles.ts';
 import type { Place } from '../../../packages/engine/src/schema.ts';
 import { applyFilters, type Filters } from './filters.ts';
+import { registerPool } from './health.ts';
 
 export const OUTPUT_DIR = join(homedir(), 'Documents', 'Places Scraper');
 
@@ -163,6 +164,7 @@ async function run(job: Job, controller: AbortController, onUpdate: (job: Job) =
   // scrapes hundreds of boxes; a fresh pool per box would re-warm every session
   // hundreds of times and hammer the proxies — the pacing/robustness fix.
   const egress = EgressPool.create(proxies, job.request.language ?? 'en', USER_AGENT);
+  const unregister = registerPool(egress, `scrape: ${job.request.queries.join(', ')}`);
   await egress.warmAll(controller.signal);
 
   // Dedupe spans the whole job, not each leg: adjacent provinces share border
@@ -288,6 +290,7 @@ async function run(job: Job, controller: AbortController, onUpdate: (job: Job) =
       }
     }
   } finally {
+    unregister();
     cancellers.delete(job.id);
     publish();
   }

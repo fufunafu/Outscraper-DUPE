@@ -24,6 +24,7 @@ import {
   type Extraction,
 } from './extraction.ts';
 import { startEnrichment, cancelEnrichment, getEnrichment, type EnrichmentRun } from './enrichment.ts';
+import { livePools, startProxyCheck, getProxyCheck, type ProxyCheck } from './health.ts';
 import { startCoverage, cancelCoverage, getCoverageRun, type CoverageRun } from './coverage.ts';
 import type { PlaceQuery } from '../../../packages/engine/src/store/database.ts';
 
@@ -56,6 +57,11 @@ function broadcastEnrichment(run: EnrichmentRun): void {
 
 function broadcastCoverage(run: CoverageRun): void {
   const payload = JSON.stringify({ type: 'coverage', coverage: run });
+  for (const res of listeners) res.write(`data: ${payload}\n\n`);
+}
+
+function broadcastHealth(check: ProxyCheck): void {
+  const payload = JSON.stringify({ type: 'health', check });
   for (const res of listeners) res.write(`data: ${payload}\n\n`);
 }
 
@@ -272,6 +278,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (req.method === 'POST' && url.pathname === '/api/coverage/cancel') {
     return json(res, 200, { cancelled: cancelCoverage() });
+  }
+
+  // --- Proxy health ---
+  if (req.method === 'GET' && url.pathname === '/api/health') {
+    const { count, source } = await loadProxies();
+    return json(res, 200, { proxies: count, source, pools: livePools(), check: getProxyCheck() });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/health/check') {
+    return json(res, 202, startProxyCheck(broadcastHealth));
   }
 
   if (req.method === 'POST' && url.pathname === '/api/database/query') {

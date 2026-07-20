@@ -9,16 +9,16 @@ import { concurrencyFor, EgressPool } from './egress.ts';
  * the pacing, health, and backoff logic, not real requests.
  */
 function pool(n: number) {
-  const urls = Array.from({ length: n }, (_, i) => `http://user:pass@10.0.0.${i}:8000`);
-  // A minimal ProxyPool stand-in: EgressPool only calls size and next().
-  let next = 0;
+  // A minimal ProxyPool stand-in: EgressPool only calls size and entries().
   const fake = {
     size: n,
-    next: () => ({ dispatch: () => {} }) as unknown,
+    entries: () =>
+      Array.from({ length: n }, (_, i) => ({
+        dispatcher: { dispatch: () => {} } as unknown,
+        label: `10.0.0.${i}:8000`,
+      })),
     close: async () => {},
   } as unknown as import('./proxy.ts').ProxyPool;
-  void urls;
-  void next;
   return EgressPool.create(fake, 'en', 'UA', { baseIntervalMs: 50, cooldownMs: 200, failureThreshold: 3 });
 }
 

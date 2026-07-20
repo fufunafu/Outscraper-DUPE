@@ -28,6 +28,7 @@ import { PlaceDatabase } from '../../../packages/engine/src/store/database.ts';
 import { verticalTerms } from '../../../packages/engine/src/verticals.ts';
 import { findRegion, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
 import { OUTPUT_DIR } from './jobs.ts';
+import { registerPool } from './health.ts';
 
 export const DATABASE_PATH = join(OUTPUT_DIR, 'places.db');
 
@@ -146,6 +147,10 @@ async function run(
   const db = new PlaceDatabase(DATABASE_PATH);
   const { pool: proxies } = await loadProxies();
   const egress = EgressPool.create(proxies, extraction.request.language ?? 'en', USER_AGENT);
+  const unregister = registerPool(
+    egress,
+    `database build: ${extraction.request.vertical} — ${extraction.request.location.region}`,
+  );
 
   try {
     const { location } = extraction.request;
@@ -254,6 +259,7 @@ async function run(
     extraction.finishedAt = Date.now();
   } finally {
     // Progress is durable in the DB; the run can be resumed even after a crash.
+    unregister();
     db.close();
     cancellers.delete(extraction.id);
     publish();
