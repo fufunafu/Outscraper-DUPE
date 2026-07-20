@@ -1099,7 +1099,14 @@ function renderActivity() {
   const x = [...extractions.values()].find(e => e.status === 'running' || e.status === 'starting');
   const host = $('ovActivity');
   if (!x) {
-    host.innerHTML = `<h4>Now running</h4><p class="hint" style="margin:0">Nothing running. Auto-build below starts (or resumes) a full sweep.</p>`;
+    // The campaign can be running while its extraction is still warming up (500
+    // proxy sessions at boot) and hasn't broadcast yet — say so, don't imply idle.
+    if (autoRun && autoRun.status === 'running') {
+      const where = autoRun.current ? `${autoRun.current.country}-${autoRun.current.region}` : 'a region';
+      host.innerHTML = `<h4>Now running</h4><p class="hint" style="margin:0">Starting ${esc(where)}… (warming proxies)</p>`;
+    } else {
+      host.innerHTML = `<h4>Now running</h4><p class="hint" style="margin:0">Nothing running. Auto-build below starts (or resumes) a full sweep.</p>`;
+    }
     return;
   }
   const p = x.progress;
