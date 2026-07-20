@@ -470,6 +470,8 @@ async function enableRemote(): Promise<{ enabled: true; url: string }> {
   try {
     key = db.getSetting('remoteKey') ?? randomBytes(6).toString('hex');
     db.setSetting('remoteKey', key);
+    // Deliberately enabled — stay enabled across restarts until disabled.
+    db.setSetting('remoteEnabled', '1');
   } finally {
     db.close();
   }
@@ -511,6 +513,12 @@ async function enableRemote(): Promise<{ enabled: true; url: string }> {
 function disableRemote(): void {
   remote?.server.close();
   remote = null;
+  const db = openDatabase();
+  try {
+    db.deleteSetting('remoteEnabled');
+  } finally {
+    db.close();
+  }
 }
 
 export function startServer(port = 4317): Promise<string> {
@@ -521,6 +529,18 @@ export function startServer(port = 4317): Promise<string> {
   // A campaign interrupted by a crash or reboot continues by itself. Delayed a
   // few seconds so the server is reachable before heavy work spins up.
   setTimeout(() => resumeCampaignIfAny(broadcastExtraction, broadcastCoverage), 5_000).unref();
+  // Remote access was a deliberate choice; restore it after a restart so the
+  // link on someone's phone doesn't silently die.
+  setTimeout(() => {
+    const db = openDatabase();
+    let wanted = false;
+    try {
+      wanted = db.getSetting('remoteEnabled') === '1';
+    } finally {
+      db.close();
+    }
+    if (wanted) void enableRemote().catch(() => undefined);
+  }, 2_000).unref();
 
   const server = createServer((req, res) => {
     handle(req, res).catch((error) => {
