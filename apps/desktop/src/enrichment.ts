@@ -112,7 +112,10 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
   // while the connection is healthy; when timeouts rise (a weak or busy uplink)
   // it backs off, so a bad-internet spell throttles itself instead of piling on
   // requests that all time out. The cap depends on proxy count.
-  let concurrency = proxies ? Math.min(80, proxiedCap(proxies.size)) : DIRECT_CAP_IDLE;
+  // Start near the cap rather than ramping up slowly from cold — benchmarks put
+  // the proxied timeout rate at ~6% around here, comfortably in the grow zone,
+  // so there's no reason to spend minutes crawling up to it after every restart.
+  let concurrency = proxies ? Math.min(160, proxiedCap(proxies.size)) : DIRECT_CAP_IDLE;
 
   for (;;) {
     try {

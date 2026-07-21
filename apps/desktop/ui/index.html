@@ -125,6 +125,28 @@
   .proxystrip.off { background:color-mix(in srgb,var(--warn) 13%,transparent); color:var(--warn); }
   .proxystrip button { margin-left:auto; }
 
+  /* Live vitals (health dashboard) */
+  .vitals { border:1px solid var(--line); border-radius:12px; overflow:hidden; margin-bottom:18px; }
+  .vbanner { display:flex; align-items:center; gap:14px; padding:14px 16px; }
+  .vbanner .vtag { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+    padding:5px 11px; border-radius:999px; white-space:nowrap; }
+  .vbanner .vtitle { font-weight:600; font-size:14px; }
+  .vbanner .vreason { font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .vbanner.ok   { background:color-mix(in srgb,var(--ok) 10%,transparent); }
+  .vbanner.warn { background:color-mix(in srgb,var(--warn) 12%,transparent); }
+  .vbanner.info { background:color-mix(in srgb,var(--accent) 11%,transparent); }
+  .vbanner.idle { background:color-mix(in srgb,var(--muted) 9%,transparent); }
+  .vtag.ok   { background:var(--ok);     color:#fff; }
+  .vtag.warn { background:var(--warn);   color:#fff; }
+  .vtag.info { background:var(--accent); color:var(--on-accent); }
+  .vtag.idle { background:color-mix(in srgb,var(--muted) 45%,transparent); color:var(--ink); }
+  .vgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(115px,1fr));
+    gap:1px; background:var(--line); border-top:1px solid var(--line); }
+  .vcell { background:var(--card); padding:10px 14px; }
+  .vnum { font-size:17px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .vnum.warn { color:var(--warn); } .vnum.ok { color:var(--ok); }
+  .vlbl { font-size:11px; color:var(--muted); margin-top:1px; }
+
   /* Coverage board */
   .regiongrid { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
   .rchip { font-size:11px; font-weight:600; padding:3px 7px; border-radius:5px;
@@ -133,9 +155,11 @@
   .rchip.p2 { background:color-mix(in srgb,var(--ok) 22%,transparent); color:var(--ok); }
   .rchip.run { background:var(--accent); color:var(--on-accent); animation:pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity:.55; } }
-  .covrow { padding:10px 0 2px; }
+  .covrow { padding:7px 0 2px; }
   .covrow + .covrow { border-top:1px solid var(--line); }
-  .covrow .bar { margin:8px 0 6px; }
+  .covrow .bar { margin:5px 0 4px; height:5px; }
+  .covrow details { margin-top:2px; }
+  .covrow summary { padding:1px 0; }
   .ovgrid { display:grid; grid-template-columns:1fr 340px; gap:18px; align-items:start; }
   @media (max-width:900px) { .ovgrid { grid-template-columns:1fr; } }
   .ovside { display:flex; flex-direction:column; gap:12px; }
@@ -339,7 +363,8 @@
   <div id="tab-health" hidden>
     <div class="card">
       <h1 style="font-size:17px"><span class="dot" style="background:var(--ok)">♥</span> Proxy health <span id="healthSummary" class="status" style="margin-left:8px"></span></h1>
-      <p class="sub">Every exit IP the scraper can use. While a run is active you see live per-IP results straight from the run; the test button checks each proxy's connectivity on demand — useful before starting an overnight build.</p>
+      <p class="sub">Every exit IP the scraper can use. While a run is active you see live throughput and per-IP results straight from the run; the test button checks each proxy's connectivity on demand — useful before starting an overnight build.</p>
+      <div id="healthVitals"></div>
       <div class="actions" style="margin-top:0;margin-bottom:16px">
         <button class="primary" id="healthCheckBtn">Test all proxies</button>
         <span class="meta" id="healthCheckMeta" style="align-self:center"></span>
@@ -1251,16 +1276,19 @@ function renderCoverage(data) {
   $('coverageBoard').innerHTML = data.verticals.map(v => {
     const pct = v.total ? Math.round(100 * v.covered / v.total) : 0;
     const mine = autoActive && autoRun.vertical === v.name;
+    // Show the bar only when there's something to show — an empty 0% bar on an
+    // idle vertical is just wasted height.
+    const showBar = mine || pct > 0;
     return `<div class="covrow">
       <div class="head" style="align-items:center">
         <div style="font-weight:600;font-size:13px">${v.name[0].toUpperCase()+v.name.slice(1)}
-          <span class="meta" style="font-weight:400">${v.covered}/${v.total} regions</span></div>
+          <span class="meta" style="font-weight:400">${v.covered}/${v.total} regions${showBar ? ` · ${pct}%` : ''}</span></div>
         ${mine
-          ? `<button class="ghost" data-covstop="1" style="padding:4px 10px;font-size:12px">Stop</button>`
-          : `<button class="ghost" data-covrun="${v.name}" style="padding:4px 10px;font-size:12px" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build</button>`}
+          ? `<button class="ghost" data-covstop="1" style="padding:3px 9px;font-size:12px">Stop</button>`
+          : `<button class="ghost" data-covrun="${v.name}" style="padding:3px 9px;font-size:12px" ${autoActive ? 'disabled title="Another auto-build is running"' : ''}>Auto-build</button>`}
       </div>
-      <div class="bar"><i style="width:${pct}%"></i></div>
-      ${mine ? `<div class="meta" style="margin-bottom:4px">pass cycle ${autoRun.cycle ?? 1} · region ${autoRun.regionsDone}/${autoRun.regionsTotal}${autoRun.failures ? ` · ${autoRun.failures} failed` : ''} · runs until stopped</div>` : ''}
+      ${showBar ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+      ${mine ? `<div class="meta" style="margin-bottom:2px">cycle ${autoRun.cycle ?? 1} · region ${autoRun.regionsDone}/${autoRun.regionsTotal}${autoRun.failures ? ` · ${autoRun.failures} failed` : ''} · runs until stopped</div>` : ''}
       <details><summary style="font-size:12px;color:var(--muted)">Region detail</summary>
         <div class="regiongrid">${v.regions.map(r =>
           `<span class="rchip ${r.running ? 'run' : r.passes >= 2 ? 'p2' : r.passes === 1 ? 'p1' : ''}"
@@ -1448,8 +1476,108 @@ async function refreshHealth() {
   try {
     const h = await (await fetch('/api/health')).json();
     healthCheck = h.check;
+    noteHealthSample(h.pools ?? []);
+    renderHealthVitals(h);
     renderHealth(h);
   } catch { /* transient; keep the last render */ }
+}
+
+/* ---- Live vitals: is the scraper fast / normal / slow, and why ---- */
+// The pool's success/failure counters are lifetime cumulative, so sampling them
+// across health polls gives a live request rate. Two-minute sliding window.
+const healthSamples = []; // {t, ok, fail}
+
+function noteHealthSample(pools) {
+  const t = Date.now();
+  let ok = 0, fail = 0;
+  for (const p of pools) for (const s of p.stats) { ok += s.successes; fail += s.failures; }
+  const last = healthSamples[healthSamples.length - 1];
+  // A gap (tab was hidden, so no polling) makes the delta span idle time and
+  // understate the rate — restart the window instead of averaging across it.
+  if (last && t - last.t > 8000) healthSamples.length = 0;
+  // A pool restart resets counters to zero; a drop means new run — restart too.
+  if (last && ok + fail < last.ok + last.fail) healthSamples.length = 0;
+  healthSamples.push({ t, ok, fail });
+  while (healthSamples.length > 2 && healthSamples[0].t < t - 120_000) healthSamples.shift();
+}
+
+// Classify the run and, when it isn't simply healthy-and-fast, explain why.
+// Health signals (backoff, benched, failure rate) are authoritative and always
+// truthful; speed is workload-dependent, so its verdict is deliberately soft.
+function healthVerdict(m) {
+  if (!m.running) return { tag: 'Idle', tone: 'idle', title: 'No active build',
+    reason: 'Start or resume a build to see live throughput. Proxy health below is still valid — use “Test all proxies” to check connectivity before an overnight run.' };
+  if (!m.rps && !m.cellsPerMin) return { tag: 'Warming up', tone: 'info', title: 'Establishing proxy sessions',
+    reason: 'Each exit IP is warming its Google session cookie. Live speed appears within a few seconds.' };
+  if (m.backoff >= 1.5) return { tag: 'Throttled', tone: 'warn', title: 'Google is rate-limiting the pool',
+    reason: `The pool widened its own pacing to back off (${m.backoff.toFixed(1)}×) after push-back from Google. Throughput is intentionally reduced to avoid a block, and it eases back up automatically as Google relaxes. Nothing to do — this is the safety valve working.` };
+  if (m.size && m.benched / m.size > 0.15) return { tag: 'Proxies worn', tone: 'warn', title: `${m.benched} of ${m.size} proxies resting`,
+    reason: 'A large share of your exit IPs keep failing and have been benched — usually worn or rotated-out Webshare addresses. Fewer working exits means lower throughput. Refreshing your Webshare proxy list (free on your plan) restores full speed.' };
+  if (m.recentFailPct != null && m.recentFailPct > 8) return { tag: 'Failures up', tone: 'warn', title: `${Math.round(m.recentFailPct)}% of recent requests failing`,
+    reason: 'Elevated failures, usually a transient wave of Google push-back or a few bad IPs. The pool benches repeat offenders automatically; if it stays high, refresh your proxy list.' };
+  // Healthy pool but few new places relative to request volume = the metro tail:
+  // re-searching already-covered cities where nearly everything is a duplicate.
+  if (m.cellsPerMin > 60 && m.placesPerMin != null && m.placesPerMin < 6)
+    return { tag: 'Dense-area tail', tone: 'info', title: 'Mostly finding duplicates',
+      reason: 'The proxies are running at full speed, but the scraper is re-checking already-covered cities, so almost every place it sees is one you already have. New-places-per-minute looks low even though nothing is wrong — expected near the end of a region.' };
+  // Healthy. Grade speed softly on cells/min (~6,000/min is a fast, full pool).
+  if (m.cellsPerMin >= 2500) return { tag: 'Fast', tone: 'ok', title: 'Running at full speed', reason: '' };
+  if (m.cellsPerMin >= 600 || m.rps >= 20) return { tag: 'Normal', tone: 'ok', title: 'Running at normal speed', reason: '' };
+  return { tag: 'Light load', tone: 'ok', title: 'Running slow — small/rural areas', reason:
+    'Low request volume here just means the current areas are sparse (few businesses per map cell), not that anything is wrong. Speed climbs again over dense cities.' };
+}
+
+function renderHealthVitals(h) {
+  const host = $('healthVitals');
+  const pools = h.pools ?? [];
+  const size = pools.reduce((a, p) => a + p.size, 0);
+  const benched = pools.reduce((a, p) => a + p.benched, 0);
+  const backoff = pools.reduce((a, p) => Math.max(a, p.backoff), 1);
+
+  let rps = null, recentFailPct = null;
+  if (healthSamples.length >= 2) {
+    const f = healthSamples[0], l = healthSamples[healthSamples.length - 1];
+    const secs = Math.max(1, (l.t - f.t) / 1000);
+    const dOk = l.ok - f.ok, dFail = l.fail - f.fail, dTot = dOk + dFail;
+    rps = dTot / secs;
+    if (dTot >= 5) recentFailPct = 100 * dFail / dTot;
+  }
+
+  const x = [...extractions.values()].find(e => e.status === 'running' || e.status === 'starting');
+  let cellsPerMin = 0, placesPerMin = null;
+  if (x) {
+    const ss = rateSamples.get(x.id) ?? [];
+    if (ss.length >= 2) {
+      const f = ss[0], l = ss[ss.length - 1];
+      const mins = Math.max(0.25, (l.t - f.t) / 60_000);
+      cellsPerMin = Math.max(0, (l.cells - f.cells) / mins);
+      placesPerMin = Math.max(0, (l.places - f.places) / mins);
+    }
+  }
+
+  const v = healthVerdict({ running: !!x, rps, recentFailPct, size, benched, backoff, cellsPerMin, placesPerMin });
+
+  const fmt = (n) => n == null ? '—' : n >= 100 ? Math.round(n).toLocaleString() : n >= 10 ? Math.round(n) : n.toFixed(1);
+  const cell = (num, lbl, cls = '') => `<div class="vcell"><div class="vnum ${cls}">${num}</div><div class="vlbl">${lbl}</div></div>`;
+  const successPct = recentFailPct == null ? null : 100 - recentFailPct;
+
+  host.innerHTML = `<div class="vitals">
+    <div class="vbanner ${v.tone}">
+      <span class="vtag ${v.tone}">${v.tag}</span>
+      <div><div class="vtitle">${v.title}</div>${v.reason ? `<div class="vreason">${v.reason}</div>` : ''}</div>
+    </div>
+    <div class="vgrid">
+      ${cell(x ? fmt(rps) : '—', 'requests / sec')}
+      ${cell(x ? fmt(cellsPerMin) : '—', 'map cells / min')}
+      ${cell(x && placesPerMin != null ? fmt(placesPerMin) : '—', 'new places / min')}
+      ${size
+        ? cell(`${(size - benched).toLocaleString()}/${size.toLocaleString()}`, 'proxies working', benched / size > 0.15 ? 'warn' : '')
+        : cell((h.proxies ?? 0).toLocaleString(), 'proxies configured')}
+      ${cell(successPct == null ? '—' : successPct.toFixed(0) + '%', 'recent success', successPct != null && successPct < 92 ? 'warn' : '')}
+      ${cell(backoff.toFixed(1) + '×', 'throttle', backoff >= 1.5 ? 'warn' : '')}
+    </div>
+  </div>
+  <p class="hint" style="margin:-8px 0 16px">Normal for a full 500-proxy run: roughly 50–150 requests/sec, throttle 1.0×, under ~10% of proxies resting. A rising throttle means Google is pushing back; many resting proxies means your Webshare IPs are wearing out and can be refreshed.</p>`;
 }
 
 function renderHealth(h) {
