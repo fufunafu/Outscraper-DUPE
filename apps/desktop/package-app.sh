@@ -70,20 +70,66 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# The supervisor: keeps exactly one server alive forever. It respawns the
+# process if it exits (a crash or OOM — which the in-process handlers can't
+# always prevent) and, via a parallel watchdog, force-restarts it if it stops
+# answering for ~2 minutes (a hang: event loop stuck, not exited). A backoff
+# guard stops a hot-loop when the server can't even start. Every real failure
+# self-heals in seconds, and the campaign auto-resumes from its checkpoints.
+cat > "$APP/Contents/Resources/supervisor.sh" <<'SUP'
+#!/bin/bash
+RES="$(cd "$(dirname "$0")" && pwd)"
+URL="http://127.0.0.1:4317"
+LOG="$HOME/Library/Logs/PlacesScraper.log"
+MAIN="$RES/app/apps/desktop/src/main.ts"
+
+# Watchdog: if the server goes unresponsive for ~2 min, kill it so the
+# supervisor loop below respawns a fresh one.
+(
+  misses=0
+  while true; do
+    /bin/sleep 30
+    if /usr/bin/curl -s -m 5 "$URL/" >/dev/null 2>&1; then
+      misses=0
+    else
+      misses=$((misses + 1))
+      if [ "$misses" -ge 4 ]; then
+        echo "[watchdog $(date '+%H:%M:%S')] unresponsive ~2min — forcing restart." >> "$LOG"
+        /usr/bin/pkill -9 -f "apps/desktop/src/main.ts"
+        misses=0
+      fi
+    fi
+  done
+) &
+
+fails=0
+while true; do
+  started=$(date +%s)
+  # NO_OPEN so a respawn never reopens the browser. Roomy heap for map queries
+  # plus concurrent crawling.
+  NO_OPEN=1 "$RES/node" --experimental-strip-types --no-warnings \
+    --max-old-space-size=4096 "$MAIN" >> "$LOG" 2>&1
+  ran=$(( $(date +%s) - started ))
+  if [ "$ran" -gt 30 ]; then fails=0; else fails=$((fails + 1)); fi
+  if [ "$fails" -ge 6 ]; then
+    echo "[supervisor $(date '+%H:%M:%S')] exited $fails times in a row quickly — stopping." >> "$LOG"
+    exit 1
+  fi
+  echo "[supervisor $(date '+%H:%M:%S')] server exited after ${ran}s — restarting." >> "$LOG"
+  /bin/sleep 3
+done
+SUP
+chmod +x "$APP/Contents/Resources/supervisor.sh"
+
 cat > "$APP/Contents/MacOS/launcher" <<'SH'
 #!/bin/bash
-# Double-click entry point: start the server if it isn't running, open the UI.
+# Double-click entry point: start the supervised server if it isn't up, open UI.
 RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
-PORT=4317
-URL="http://127.0.0.1:$PORT"
+URL="http://127.0.0.1:4317"
 
 if ! /usr/bin/curl -s -m 1 "$URL/" >/dev/null 2>&1; then
-  # Roomy heap: a whole-database map query plus concurrent site crawling can
-  # spike allocations; the default limit is what an OOM crash landed on.
-  /usr/bin/nohup "$RES/node" --experimental-strip-types --no-warnings \
-    --max-old-space-size=4096 \
-    "$RES/app/apps/desktop/src/main.ts" \
-    >> "$HOME/Library/Logs/PlacesScraper.log" 2>&1 &
+  # Detach the supervisor so it outlives this launcher process.
+  /usr/bin/nohup "$RES/supervisor.sh" >/dev/null 2>&1 &
   for _ in $(seq 1 60); do
     /usr/bin/curl -s -m 1 "$URL/" >/dev/null 2>&1 && break
     /bin/sleep 0.5

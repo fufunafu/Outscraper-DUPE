@@ -432,11 +432,11 @@ export class PlaceDatabase {
       return { mode: 'points', points };
     }
 
-    // Otherwise bin into a fine grid — ~110 cells across the viewport. Fine
-    // enough that the client's heat map blends into a smooth density gradient
-    // rather than blocky patches, while still only a few hundred rows on the wire.
+    // Bin into ~26 cells across the viewport: coarse enough that the count
+    // bubbles sit apart instead of overlapping into a clump, fine enough to show
+    // where density really concentrates. Zooming in re-bins at the new scale.
     const spanLng = Math.max(1e-6, bounds.e - bounds.w);
-    const grid = spanLng / 110;
+    const grid = spanLng / 26;
     const clusters = this.#db
       .prepare(`SELECT COUNT(*) AS count, AVG(latitude) AS lat, AVG(longitude) AS lng
                 FROM places ${where} ${box}
