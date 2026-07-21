@@ -128,6 +128,27 @@ function collectStructured(html: string, into: Set<string>): void {
   }
 }
 
+/**
+ * Emails sitting in a quoted string inside a <script> — a JS config var
+ * (`publicKey: 'sales@acme.com'`) or a JSON blob under any key
+ * (`"contactEmail":"info@acme.com"`), which the structured pass (only `"email"`)
+ * and the plain-text pass (strips scripts) both miss. Measured on real misses:
+ * this is where a JS-rendered site's own address usually hides.
+ *
+ * Restricted to the site's OWN domain on purpose. A page's scripts are full of
+ * third-party addresses — theme authors, Sentry DSNs, support inboxes of the
+ * site builder — and storing one of those as the business's contact is worse
+ * than finding nothing for cold outreach. An own-domain quoted address is
+ * almost always the real thing; anything else is dropped.
+ */
+function collectOwnDomainQuoted(html: string, into: Set<string>, siteDomain: string | null): void {
+  if (!siteDomain) return;
+  for (const match of html.matchAll(/["']([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})["']/gi)) {
+    const email = match[1]!.toLowerCase();
+    if (email.split('@')[1] === siteDomain && isPlausible(email)) into.add(email);
+  }
+}
+
 export interface RankedEmails {
   /** Emails found, best-first. */
   emails: string[];
@@ -174,10 +195,12 @@ const MAX_HTML_BYTES = 1_500_000;
 /** Extract and rank every email from one page's HTML. */
 export function extractEmails(html: string, siteUrl: string | null): RankedEmails {
   const capped = html.length > MAX_HTML_BYTES ? html.slice(0, MAX_HTML_BYTES) : html;
+  const siteDomain = domainOf(siteUrl);
   const found = new Set<string>();
   collectCfEmails(capped, found);
   collectMailto(capped, found);
   collectStructured(capped, found);
+  collectOwnDomainQuoted(capped, found, siteDomain);
   collectPlainText(capped, found);
-  return { emails: rankEmails(found, domainOf(siteUrl)) };
+  return { emails: rankEmails(found, siteDomain) };
 }

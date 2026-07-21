@@ -93,6 +93,26 @@ describe('extractEmails', () => {
     assert.ok(caps.emails.includes('info@brightglass.com'), `got ${caps.emails.join(',')}`);
   });
 
+  it('finds an own-domain address quoted inside a script, but ignores third-party ones', () => {
+    // A JS config var and a JSON key under a non-"email" name — both invisible
+    // to the structured pass and stripped by the plain-text pass.
+    const html = `<script>
+      var cfg = { publicKey: 'sales@acme.com', tracing: 'https://abc123@sentry.io/9' };
+      window.__DATA__ = {"contactEmail":"info@acme.com","themeAuthor":"hello@somebuilder.com"};
+    </script><div id="app"></div>`;
+    const { emails } = extractEmails(html, 'https://www.acme.com');
+    assert.ok(emails.includes('sales@acme.com'), `got ${emails.join(',')}`);
+    assert.ok(emails.includes('info@acme.com'), `got ${emails.join(',')}`);
+    // Third-party addresses (theme author, Sentry DSN) must NOT be stored.
+    assert.ok(!emails.includes('hello@somebuilder.com'), `leaked third-party: ${emails.join(',')}`);
+    assert.ok(!emails.some((e) => e.includes('sentry')), `leaked DSN: ${emails.join(',')}`);
+  });
+
+  it('does not pull own-domain quoted emails when the site domain is unknown', () => {
+    const { emails } = extractEmails(`<script>var e='info@acme.com'</script>`, null);
+    assert.deepEqual(emails, [], 'no site domain → the script-scoped pass stays off');
+  });
+
   it('stays fast on pathological whitespace (regression: catastrophic backtracking)', () => {
     // A page like this — huge whitespace runs, brackets, no emails — once pinned
     // the event loop for minutes inside the obfuscation-normalising regex and
