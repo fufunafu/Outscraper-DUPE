@@ -1577,7 +1577,7 @@ function renderHealthVitals(h) {
       ${cell(backoff.toFixed(1) + '×', 'throttle', backoff >= 1.5 ? 'warn' : '')}
     </div>
   </div>
-  <p class="hint" style="margin:-8px 0 16px">Normal for a full 500-proxy run: roughly 50–150 requests/sec, throttle 1.0×, under ~10% of proxies resting. A rising throttle means Google is pushing back; many resting proxies means your Webshare IPs are wearing out and can be refreshed.</p>`;
+  <p class="hint" style="margin:-8px 0 16px">Normal for a full 500-proxy run: roughly 50–300 requests/sec, throttle 1.0×, under ~10% of proxies resting. A rising throttle means Google is pushing back; many resting proxies means your Webshare IPs are wearing out and can be refreshed.</p>`;
 }
 
 function renderHealth(h) {
