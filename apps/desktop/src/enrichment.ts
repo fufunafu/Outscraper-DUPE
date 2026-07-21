@@ -18,8 +18,6 @@
 
 import { enrichPlaces, type CrawlOutcome } from '../../../packages/engine/src/enrich/enrich.ts';
 import { domainOf } from '../../../packages/engine/src/enrich/emails.ts';
-import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
-import type { ProxyPool } from '../../../packages/engine/src/search/proxy.ts';
 import { PlaceDatabase } from '../../../packages/engine/src/store/database.ts';
 import type { EnrichedPlace } from '../../../packages/engine/src/schema.ts';
 import { DATABASE_PATH, listExtractions } from './extraction.ts';
@@ -39,15 +37,21 @@ const BATCH = 300;
 const IDLE_POLL_MS = 60_000;
 const PAUSE_POLL_MS = 3_000;
 
-// Concurrency. The old ceiling was one home IP: crawling flat-out from it
-// starved the connection (and the Google Maps extraction sharing it), so it was
-// throttled to 4 while extracting — which capped throughput at ~125 sites/min
-// and made a 200k backlog a 27-hour wait. With a proxy pool, each site fetch
-// exits a different one of hundreds of IPs, so we can run far wider without
-// hammering anyone: the bound becomes the pool size, not politeness.
-const PROXIED_CONCURRENCY = 80;
-const DIRECT_CONCURRENCY_IDLE = 14;
-const DIRECT_CONCURRENCY_BUSY = 4;
+// Concurrency — crawls run direct from the home IP, NOT through the proxy pool.
+// The proxies would parallelise across hundreds of exit IPs, but undici's
+// ProxyAgent throws an *uncaught* exception in its own connection-cleanup when a
+// site fails through it (agent.js closeClientIfUnused reads .origin of an
+// undefined dispatcher). Email crawling hits dead sites constantly, so that
+// crash is guaranteed — it would take down the whole app. The Google Maps
+// extraction gets away with proxies only because it talks to Google, which
+// rarely connection-errors. So we scale the home IP instead: benchmarked, the
+// home connection saturates around here (~480 sites/min), and throughput was
+// flat from 16 to 64 while the hit rate held at 50% — the old value of 4 was
+// far too timid and made a 200k backlog a 27-hour wait.
+const CONCURRENCY_IDLE = 40;
+// While an extraction shares the uplink, stay a notch lower so its proxy
+// traffic isn't starved — still ~6x the old throttle.
+const CONCURRENCY_BUSY = 24;
 
 /** Session memory of domains whose crawls keep failing; see the skip logic below. */
 const domainFails = new Map<string, number>();
@@ -86,17 +90,6 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
   const publish = () => onUpdate(state);
   // One long-lived handle; WAL lets extraction writes interleave freely.
   const db = new PlaceDatabase(DATABASE_PATH);
-
-  // The proxy fleet is what unlocks real throughput. Email crawling doesn't need
-  // Google's per-IP pacing (it hits arbitrary business sites), so a plain
-  // round-robin ProxyPool — not the extraction's paced EgressPool — is right.
-  // Loaded once: proxies rarely change, and a change is a restart anyway.
-  let proxies: ProxyPool | null = null;
-  try {
-    proxies = (await loadProxies()).pool;
-  } catch {
-    // No proxies configured — fall back to direct crawling from the home IP.
-  }
 
   for (;;) {
     try {
@@ -146,22 +139,15 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
       const checkedBefore = state.checked;
       const foundBefore = state.found;
 
-      // With a proxy pool, crawl wide — each fetch exits a different IP, so it
-      // neither congests the home connection nor competes with the Google Maps
-      // extraction. Without proxies we fall back to the home IP, where flat-out
-      // crawling alongside an extraction starves both: keep the old
-      // congestion-aware throttle (4 while extracting, 14 idle) for that case.
+      // Wider while idle; a touch narrower while an extraction shares the uplink.
       const extracting = listExtractions().some((x) => x.status === 'running' || x.status === 'starting');
-      const concurrency = proxies
-        ? PROXIED_CONCURRENCY
-        : extracting ? DIRECT_CONCURRENCY_BUSY : DIRECT_CONCURRENCY_IDLE;
+      const concurrency = extracting ? CONCURRENCY_BUSY : CONCURRENCY_IDLE;
       const outcomes: CrawlOutcome[] = [];
       const enriched = await enrichPlaces(
         places,
         {
-          proxies,
           concurrency,
-          perSiteTimeoutMs: proxies ? 15_000 : extracting ? 20_000 : 12_000,
+          perSiteTimeoutMs: extracting ? 18_000 : 15_000,
           outcomes,
         },
         (p) => {
