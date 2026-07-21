@@ -125,6 +125,24 @@ describe('extractEmails', () => {
     assert.deepEqual(emails, []);
     assert.ok(elapsed < 2_000, `took ${Math.round(elapsed)}ms; must stay linear`);
   });
+
+  it('stays fast on a pathological dotted domain run (regression: email-regex ReDoS)', () => {
+    // A long run of single-char dotted labels with no valid TLD end made the
+    // domain part of the email regex backtrack for seconds, pinning the app at
+    // 99% CPU. Bounded quantifiers cap the search space.
+    const evil = `<p>${'a'.repeat(50)}@${'a.'.repeat(40_000)} end</p>`;
+    const started = performance.now();
+    const { emails } = extractEmails(evil, 'x.com');
+    const elapsed = performance.now() - started;
+    assert.deepEqual(emails, []);
+    assert.ok(elapsed < 1_000, `took ${Math.round(elapsed)}ms; must stay bounded`);
+  });
+
+  it('still matches multi-label and hyphenated domains', () => {
+    const { emails } = extractEmails('<p>info@acme.co.uk and bob@a-b-glass.io</p>', 'acme.co.uk');
+    assert.ok(emails.includes('info@acme.co.uk'));
+    assert.ok(emails.includes('bob@a-b-glass.io'));
+  });
 });
 
 describe('extractSocials', () => {

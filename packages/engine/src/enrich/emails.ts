@@ -22,7 +22,12 @@ const JUNK_PATTERNS = [
   /@[0-9.]+$/, // bare IPs
 ];
 
-const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+// Every quantifier is BOUNDED to real-email limits (label ≤63 chars per DNS,
+// ≤12 labels, TLD ≤24). Unbounded forms — `[a-z0-9.-]+\.[a-z]{2,}` or even
+// `(?:\.[a-z0-9-]+)*\.[a-z]{2,}` — backtrack for seconds on a long dotted run
+// with no valid ending, a ReDoS that pinned the whole app at 99% CPU. Bounded,
+// the engine can only ever explore a fixed, tiny search space.
+const EMAIL_RE = /[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,12}\.[a-z]{2,24}/gi;
 
 function isPlausible(email: string): boolean {
   const lower = email.toLowerCase();
@@ -143,7 +148,7 @@ function collectStructured(html: string, into: Set<string>): void {
  */
 function collectOwnDomainQuoted(html: string, into: Set<string>, siteDomain: string | null): void {
   if (!siteDomain) return;
-  for (const match of html.matchAll(/["']([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})["']/gi)) {
+  for (const match of html.matchAll(/["']([a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,12}\.[a-z]{2,24})["']/gi)) {
     const email = match[1]!.toLowerCase();
     if (email.split('@')[1] === siteDomain && isPlausible(email)) into.add(email);
   }

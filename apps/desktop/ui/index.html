@@ -1160,11 +1160,12 @@ async function refreshMapData(fitToData) {
     const pts = data.clusters.map((c) => [c.lat, c.lng, 0.15 + 0.85 * rank.get(c)]);
     if (window.L.heatLayer) {
       heatLayer = L.heatLayer(pts, {
-        // maxZoom pinned to the current zoom: leaflet.heat otherwise scales
-        // intensity down hard when the view is far below the map's max zoom,
-        // which kept the peaks stuck at yellow no matter the ceiling.
-        radius: 24, blur: 14, max: 1, minOpacity: 0.25, maxZoom: map.getZoom(),
-        gradient: { 0.3: '#2b5fd0', 0.5: '#22a06b', 0.65: '#e0c53b', 0.8: '#e0793b', 0.95: '#c0392b' },
+        // `max` tuned by eye: high enough that the moderate band stays
+        // green/yellow (not a wall of red), low enough that genuine metro cores,
+        // where many dense cells stack, reach orange/red. No maxZoom pin — that
+        // removed all dampening and saturated everything.
+        radius: 20, blur: 15, max: 2.6, minOpacity: 0.22,
+        gradient: { 0.35: '#2b5fd0', 0.55: '#22a06b', 0.7: '#e0c53b', 0.85: '#e0793b', 1.0: '#c0392b' },
       }).addTo(map);
     }
     $('mapHint').textContent = `${data.total.toLocaleString()} places · hotter = denser · zoom in for individual businesses`;
