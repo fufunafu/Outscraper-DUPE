@@ -1119,8 +1119,13 @@ async function runMapQuery(filter = {}) {
 }
 
 // Fetch just what's inside the current viewport, aggregated by the server.
+let mapSeq = 0;
 async function refreshMapData(fitToData) {
   if (!map) return;
+  // A pan/zoom fires several fetches; responses can land out of order (a slow
+  // zoomed-in "points" reply arriving after a fast zoomed-out "heat" one leaves
+  // stale pins clumped on the map). Only the newest request may render.
+  const seq = ++mapSeq;
   const b = map.getBounds();
   const body = { filter: mapFilter, zoom: map.getZoom(),
     bounds: { n: b.getNorth(), s: b.getSouth(), e: b.getEast(), w: b.getWest() } };
@@ -1128,25 +1133,38 @@ async function refreshMapData(fitToData) {
   try {
     data = await (await fetch('/api/database/geo', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })).json();
   } catch {
-    $('mapHint').textContent = 'Loading… (app busy scraping; retrying)';
-    setTimeout(() => refreshMapData(fitToData), 4000);
+    if (seq === mapSeq) { $('mapHint').textContent = 'Loading… (app busy scraping; retrying)'; setTimeout(() => refreshMapData(fitToData), 4000); }
     return;
   }
+  if (seq !== mapSeq) return; // a newer view superseded this response
   // Reset both renderings; each refresh shows exactly one (heat OR pins).
   mapLayer.clearLayers();
   if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
 
   if (data.mode === 'clusters') {
-    // Zoomed out / dense: a heat map. Each grid-cell centroid is one weighted
-    // point; log-scaling the count keeps mid-density areas visible next to a few
-    // huge metros instead of everything but LA reading as cold.
-    const maxCount = Math.max(1, ...data.clusters.map((c) => c.count));
-    const maxW = Math.log10(maxCount + 1);
-    const pts = data.clusters.map((c) => [c.lat, c.lng, Math.log10(c.count + 1)]);
+    // Zoomed out / dense: a heat map. Weight by √count, not log: log made a
+    // 100-place cell already read half-hot, so most of the populated band went
+    // red. √ spreads the range so only the genuine metros peak. A tighter radius
+    // keeps neighbouring cells from blending into one saturated blob, and the
+    // ceiling is pushed above the single densest cell so the top isn't clipped.
+    // Rank-based intensity: the data is wildly skewed (a typical cell has ~60
+    // places, the densest tens of thousands), so any magnitude-based scale either
+    // washes everything red or leaves the peaks cold. Colouring each cell by its
+    // DENSITY RANK (0 = sparsest, 1 = densest) spreads the full blue→red spectrum
+    // evenly, so relative concentration always reads clearly. Adjacent dense
+    // cells still sum, so true metro cores burn red while the moderate band
+    // settles into green/yellow.
+    const order = [...data.clusters].sort((a, b) => a.count - b.count);
+    const rank = new Map();
+    order.forEach((c, i) => rank.set(c, order.length > 1 ? i / (order.length - 1) : 1));
+    const pts = data.clusters.map((c) => [c.lat, c.lng, 0.15 + 0.85 * rank.get(c)]);
     if (window.L.heatLayer) {
       heatLayer = L.heatLayer(pts, {
-        radius: 28, blur: 22, max: maxW, minOpacity: 0.35,
-        gradient: { 0.2: '#3b6fe0', 0.45: '#22a06b', 0.65: '#e0a53b', 0.85: '#e0563b', 1.0: '#c0392b' },
+        // maxZoom pinned to the current zoom: leaflet.heat otherwise scales
+        // intensity down hard when the view is far below the map's max zoom,
+        // which kept the peaks stuck at yellow no matter the ceiling.
+        radius: 24, blur: 14, max: 1, minOpacity: 0.25, maxZoom: map.getZoom(),
+        gradient: { 0.3: '#2b5fd0', 0.5: '#22a06b', 0.65: '#e0c53b', 0.8: '#e0793b', 0.95: '#c0392b' },
       }).addTo(map);
     }
     $('mapHint').textContent = `${data.total.toLocaleString()} places · hotter = denser · zoom in for individual businesses`;

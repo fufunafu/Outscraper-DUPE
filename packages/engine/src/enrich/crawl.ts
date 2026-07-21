@@ -7,9 +7,32 @@
  * shallow: the goal is one business's email, not a crawl of their whole site.
  */
 
-import { fetch as undiciFetch, type Dispatcher, type RequestInit as UndiciRequestInit } from 'undici';
+import { Agent, fetch as undiciFetch, type Dispatcher, type RequestInit as UndiciRequestInit } from 'undici';
 
 import { domainOf } from './emails.ts';
+
+/**
+ * The dispatcher for direct (proxy-less) crawls — the email finder's path.
+ *
+ * undici keeps one connection pool PER ORIGIN and never evicts them, so crawling
+ * tens of thousands of distinct business sites over a long run leaks a pool per
+ * host until the process is thrashing GC at multiple gigabytes. We use our own
+ * Agent (bounded, short keep-alive) and recycle it every so often: destroying
+ * the old one drops all its accumulated per-origin pools at once. Bounded pool
+ * count = bounded memory, no matter how many sites get crawled.
+ */
+const CRAWL_AGENT_OPTS = { connections: 64, keepAliveTimeout: 4_000, keepAliveMaxTimeout: 8_000 };
+let crawlAgent = new Agent(CRAWL_AGENT_OPTS);
+let crawlsSinceRecycle = 0;
+function directCrawlDispatcher(): Dispatcher {
+  if (++crawlsSinceRecycle >= 2_500) {
+    crawlsSinceRecycle = 0;
+    const old = crawlAgent;
+    crawlAgent = new Agent(CRAWL_AGENT_OPTS);
+    void old.close().catch(() => void old.destroy());
+  }
+  return crawlAgent;
+}
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -83,7 +106,9 @@ async function fetchPage(url: string, options: CrawlOptions): Promise<FetchResul
       },
       signal,
       redirect: 'follow',
-      ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+      // A caller's dispatcher (proxied scrape) wins; otherwise our recycled
+      // direct agent, never undici's global one whose pools grow unbounded.
+      dispatcher: options.dispatcher ?? directCrawlDispatcher(),
     } as UndiciRequestInit);
 
     const type = res.headers.get('content-type') ?? '';
