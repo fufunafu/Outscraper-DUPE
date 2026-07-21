@@ -76,6 +76,13 @@ export interface GeoPoint {
   site: string | null;
 }
 
+/** One aggregated map bubble: a grid cell's centroid and how many places it holds. */
+export interface MapCluster {
+  lat: number;
+  lng: number;
+  count: number;
+}
+
 /** The columns pulled out of the JSON blob for indexed querying. */
 const INDEXED_COLUMNS = [
   'cid', 'place_id', 'name', 'category', 'subtypes', 'full_address', 'city',
@@ -127,6 +134,8 @@ export class PlaceDatabase {
       CREATE INDEX IF NOT EXISTS idx_places_category ON places(category);
       CREATE INDEX IF NOT EXISTS idx_places_city ON places(city);
       CREATE INDEX IF NOT EXISTS idx_places_state ON places(state);
+      -- Viewport map queries (bounds + grid aggregation) scan by coordinate.
+      CREATE INDEX IF NOT EXISTS idx_places_latlng ON places(latitude, longitude);
 
       CREATE TABLE IF NOT EXISTS completed_units (
         key TEXT PRIMARY KEY,
@@ -378,7 +387,7 @@ export class PlaceDatabase {
    * pin. Kept to a handful of columns so tens of thousands of points travel to
    * the browser without dragging every 54-field record along.
    */
-  geo(filter: PlaceQuery = {}, limit = 200_000): GeoPoint[] {
+  geo(filter: PlaceQuery = {}, limit = 50_000): GeoPoint[] {
     const { clause, params } = this.#where(filter);
     const and = clause ? `${clause} AND` : 'WHERE';
     const rows = this.#db
@@ -388,6 +397,52 @@ export class PlaceDatabase {
                 ORDER BY reviews DESC NULLS LAST LIMIT ${limit}`)
       .all(params) as unknown as GeoPoint[];
     return rows;
+  }
+
+  /**
+   * Map data for one viewport, aggregated server-side so the browser only ever
+   * receives a few hundred markers no matter how many millions the database
+   * holds. Only the visible box is scanned (indexed on lat/lng); points are
+   * binned into a grid whose size follows the zoom. When the box is sparse
+   * enough to plot every point, individual points are returned instead so their
+   * details show in popups.
+   */
+  geoView(
+    filter: PlaceQuery,
+    bounds: { n: number; s: number; e: number; w: number },
+    zoom: number,
+  ): { mode: 'clusters'; clusters: MapCluster[] } | { mode: 'points'; points: GeoPoint[] } {
+    const { clause, params } = this.#where(filter);
+    const where = clause ? `${clause} AND` : 'WHERE';
+    const box = 'latitude IS NOT NULL AND longitude IS NOT NULL AND latitude BETWEEN @s AND @n AND longitude BETWEEN @w AND @e';
+    const p = { ...params, n: bounds.n, s: bounds.s, e: bounds.e, w: bounds.w };
+
+    const inView = (this.#db
+      .prepare(`SELECT COUNT(*) AS n FROM places ${where} ${box}`)
+      .get(p) as { n: number }).n;
+
+    // Few enough to plot individually — return real points with popup detail.
+    const POINT_THRESHOLD = 2_000;
+    if (inView <= POINT_THRESHOLD) {
+      const points = this.#db
+        .prepare(`SELECT latitude AS lat, longitude AS lng, name, category, city, rating, reviews,
+                         phone, email_1 AS email, site
+                  FROM places ${where} ${box} ORDER BY reviews DESC NULLS LAST LIMIT ${POINT_THRESHOLD}`)
+        .all(p) as unknown as GeoPoint[];
+      return { mode: 'points', points };
+    }
+
+    // Otherwise bin into a grid. ~64 cells across the viewport reads as clusters
+    // without clumping; the divisor is derived from the visible span, not zoom,
+    // so it is correct regardless of projection quirks.
+    const spanLng = Math.max(1e-6, bounds.e - bounds.w);
+    const grid = spanLng / 64;
+    const clusters = this.#db
+      .prepare(`SELECT COUNT(*) AS count, AVG(latitude) AS lat, AVG(longitude) AS lng
+                FROM places ${where} ${box}
+                GROUP BY CAST(latitude / @grid AS INT), CAST(longitude / @grid AS INT)`)
+      .all({ ...p, grid }) as unknown as MapCluster[];
+    return { mode: 'clusters', clusters };
   }
 
   /** Contactability at a glance: how much of the database is actionable as leads. */

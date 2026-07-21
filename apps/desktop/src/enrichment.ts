@@ -18,6 +18,8 @@
 
 import { enrichPlaces, type CrawlOutcome } from '../../../packages/engine/src/enrich/enrich.ts';
 import { domainOf } from '../../../packages/engine/src/enrich/emails.ts';
+import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
+import type { ProxyPool } from '../../../packages/engine/src/search/proxy.ts';
 import { PlaceDatabase } from '../../../packages/engine/src/store/database.ts';
 import type { EnrichedPlace } from '../../../packages/engine/src/schema.ts';
 import { DATABASE_PATH, listExtractions } from './extraction.ts';
@@ -33,9 +35,19 @@ export interface EnrichmentState {
   startedAt: number;
 }
 
-const BATCH = 150;
+const BATCH = 300;
 const IDLE_POLL_MS = 60_000;
 const PAUSE_POLL_MS = 3_000;
+
+// Concurrency. The old ceiling was one home IP: crawling flat-out from it
+// starved the connection (and the Google Maps extraction sharing it), so it was
+// throttled to 4 while extracting — which capped throughput at ~125 sites/min
+// and made a 200k backlog a 27-hour wait. With a proxy pool, each site fetch
+// exits a different one of hundreds of IPs, so we can run far wider without
+// hammering anyone: the bound becomes the pool size, not politeness.
+const PROXIED_CONCURRENCY = 80;
+const DIRECT_CONCURRENCY_IDLE = 14;
+const DIRECT_CONCURRENCY_BUSY = 4;
 
 /** Session memory of domains whose crawls keep failing; see the skip logic below. */
 const domainFails = new Map<string, number>();
@@ -74,6 +86,17 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
   const publish = () => onUpdate(state);
   // One long-lived handle; WAL lets extraction writes interleave freely.
   const db = new PlaceDatabase(DATABASE_PATH);
+
+  // The proxy fleet is what unlocks real throughput. Email crawling doesn't need
+  // Google's per-IP pacing (it hits arbitrary business sites), so a plain
+  // round-robin ProxyPool — not the extraction's paced EgressPool — is right.
+  // Loaded once: proxies rarely change, and a change is a restart anyway.
+  let proxies: ProxyPool | null = null;
+  try {
+    proxies = (await loadProxies()).pool;
+  } catch {
+    // No proxies configured — fall back to direct crawling from the home IP.
+  }
 
   for (;;) {
     try {
@@ -123,18 +146,22 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
       const checkedBefore = state.checked;
       const foundBefore = state.found;
 
-      // A running extraction pulls its traffic through this same connection.
-      // Crawling business sites flat-out alongside it starves both: enrichment
-      // fetches time out en masse and sites get written off as unreachable.
-      // (Measured: ~60% hit rate on a quiet line vs ~19% lifetime with the old
-      // one-shot marking.) Under load, drop concurrency and stretch the timeout.
+      // With a proxy pool, crawl wide — each fetch exits a different IP, so it
+      // neither congests the home connection nor competes with the Google Maps
+      // extraction. Without proxies we fall back to the home IP, where flat-out
+      // crawling alongside an extraction starves both: keep the old
+      // congestion-aware throttle (4 while extracting, 14 idle) for that case.
       const extracting = listExtractions().some((x) => x.status === 'running' || x.status === 'starting');
+      const concurrency = proxies
+        ? PROXIED_CONCURRENCY
+        : extracting ? DIRECT_CONCURRENCY_BUSY : DIRECT_CONCURRENCY_IDLE;
       const outcomes: CrawlOutcome[] = [];
       const enriched = await enrichPlaces(
         places,
         {
-          concurrency: extracting ? 4 : 14,
-          perSiteTimeoutMs: extracting ? 20_000 : 12_000,
+          proxies,
+          concurrency,
+          perSiteTimeoutMs: proxies ? 15_000 : extracting ? 20_000 : 12_000,
           outcomes,
         },
         (p) => {

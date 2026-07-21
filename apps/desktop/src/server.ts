@@ -251,18 +251,27 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   // Map points for the current filter — same query language as the table view.
   if (req.method === 'POST' && url.pathname === '/api/database/geo') {
-    const filter = (await readBody(req)) as PlaceQuery;
+    const body = (await readBody(req)) as {
+      filter?: PlaceQuery;
+      bounds?: { n: number; s: number; e: number; w: number };
+      zoom?: number;
+    };
+    const filter = body.filter ?? (body as PlaceQuery); // tolerate the old flat shape
     const db = openDatabase();
     try {
-      // Clustering keeps this many pins smooth; enough to show the whole
-      // database today with headroom, capped so a runaway payload can't hang
-      // the browser once it grows past a few hundred thousand.
-      const limit = 200_000;
+      // Viewport-aware: aggregate server-side into a few hundred bubbles for the
+      // visible box, so the map stays smooth from thousands to millions of rows.
+      // The client sends its current bounds + zoom on every pan/zoom.
+      if (body.bounds) {
+        const view = db.geoView(filter, body.bounds, body.zoom ?? 4);
+        const total = db.countWhere(filter);
+        return json(res, 200, { ...view, total });
+      }
+      // No bounds (a caller that just wants raw points) — capped fallback.
+      const limit = 50_000;
       const points = db.geo(filter, limit);
       const total = db.countWhere(filter);
-      // Truncated only when the cap was actually hit — not merely because some
-      // matching rows lack coordinates (those can't be plotted regardless).
-      return json(res, 200, { points, total, truncated: points.length >= limit });
+      return json(res, 200, { mode: 'points', points, total, truncated: points.length >= limit });
     } finally {
       db.close();
     }
