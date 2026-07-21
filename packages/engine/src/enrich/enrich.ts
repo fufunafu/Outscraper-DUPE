@@ -17,7 +17,7 @@ import { extractEmails } from './emails.ts';
 import { extractSocials } from './socials.ts';
 
 /** What happened when one place's site was crawled. */
-export type CrawlOutcome = 'ok' | 'unreachable' | 'no_site';
+export type CrawlOutcome = 'ok' | 'unreachable' | 'timeout' | 'no_site';
 
 export interface EnrichOptions {
   proxies?: ProxyPool | null;
@@ -52,7 +52,7 @@ async function enrichOne(
     timeoutMs: options.perSiteTimeoutMs ?? 12_000,
     signal: options.signal,
   });
-  if (!crawl.html) return { place: enriched, outcome: 'unreachable' };
+  if (!crawl.html) return { place: enriched, outcome: crawl.timedOut ? 'timeout' : 'unreachable' };
 
   const { emails } = extractEmails(crawl.html, crawl.finalUrl ?? place.site);
   const socials = extractSocials(crawl.html);

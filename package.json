@@ -20,6 +20,6 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "undici": "^8.7.0"
+    "undici": "^8.8.0"
   }
 }

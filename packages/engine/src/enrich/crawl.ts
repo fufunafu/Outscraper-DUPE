@@ -33,6 +33,9 @@ export interface CrawlResult {
   pagesFetched: number;
   /** Set when the site couldn't be reached at all. */
   error?: string;
+  /** The homepage failed specifically by timing out — a slow-connection signal,
+   *  not a dead site. Lets the caller throttle when the network is struggling. */
+  timedOut?: boolean;
 }
 
 /**
@@ -60,7 +63,14 @@ async function readCapped(res: Awaited<ReturnType<typeof undiciFetch>>, cap: num
   return out;
 }
 
-async function fetchPage(url: string, options: CrawlOptions): Promise<{ html: string; finalUrl: string } | null> {
+interface FetchResult {
+  page: { html: string; finalUrl: string } | null;
+  /** True when the attempt was aborted by our own timeout — the "bad connection"
+   *  signal, distinct from a DNS/refused failure that means the site is dead. */
+  timedOut: boolean;
+}
+
+async function fetchPage(url: string, options: CrawlOptions): Promise<FetchResult> {
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 12_000);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   try {
@@ -80,7 +90,7 @@ async function fetchPage(url: string, options: CrawlOptions): Promise<{ html: st
     if (!res.ok || !type.includes('html')) {
       // Drain the body so the connection can be reused.
       await res.body?.cancel();
-      return null;
+      return { page: null, timedOut: false };
     }
     // Cap the body WHILE reading, not after. `res.text()` fully decompresses
     // first, so a small brotli/gzip payload that expands to gigabytes (a
@@ -89,9 +99,11 @@ async function fetchPage(url: string, options: CrawlOptions): Promise<{ html: st
     // Reading the stream and stopping at the cap means the rest is never
     // decompressed at all.
     const html = await readCapped(res, 1_500_000);
-    return { html, finalUrl: res.url };
+    return { page: { html, finalUrl: res.url }, timedOut: false };
   } catch {
-    return null;
+    // Our timeout signal firing means the request was too slow — the congestion
+    // signal. A caller-supplied abort doesn't count as a timeout.
+    return { page: null, timedOut: timeout.aborted && !options.signal?.aborted };
   }
 }
 
@@ -173,19 +185,22 @@ export async function crawlSite(site: string, options: CrawlOptions = {}): Promi
 
   // Many "unreachable" sites just need http instead of https, or the other www.
   let home = await fetchPage(start, options);
-  if (!home) {
+  let timedOut = home.timedOut;
+  if (!home.page) {
     for (const alt of fallbackUrls(start)) {
       home = await fetchPage(alt, options);
-      if (home) break;
+      timedOut = timedOut || home.timedOut;
+      if (home.page) break;
     }
   }
-  if (!home) return { html: '', finalUrl: null, pagesFetched: 0, error: 'homepage unreachable' };
+  if (!home.page) return { html: '', finalUrl: null, pagesFetched: 0, error: 'homepage unreachable', timedOut };
+  const homePage = home.page;
 
-  const parts = [home.html];
+  const parts = [homePage.html];
   let fetched = 1;
 
   const maxExtra = options.maxExtraPages ?? 2;
-  const candidates = contactLinks(home.html, home.finalUrl);
+  const candidates = contactLinks(homePage.html, homePage.finalUrl);
 
   // A JS-rendered site (Wix, Squarespace, most builders) serves a homepage
   // whose nav only exists after scripts run, so link discovery comes up empty
@@ -193,7 +208,7 @@ export async function crawlSite(site: string, options: CrawlOptions = {}): Promi
   // — a 404 costs one cheap request; a hit is where the email usually lives.
   if (candidates.length === 0) {
     try {
-      const origin = new URL(home.finalUrl).origin;
+      const origin = new URL(homePage.finalUrl).origin;
       candidates.push(`${origin}/contact`, `${origin}/contact-us`, `${origin}/about`);
     } catch {
       // finalUrl unparsable; homepage HTML is all we get.
@@ -202,12 +217,12 @@ export async function crawlSite(site: string, options: CrawlOptions = {}): Promi
 
   for (const link of candidates.slice(0, maxExtra)) {
     if (options.signal?.aborted) break;
-    const page = await fetchPage(link, options);
+    const { page } = await fetchPage(link, options);
     if (page) {
       parts.push(page.html);
       fetched += 1;
     }
   }
 
-  return { html: parts.join('\n'), finalUrl: home.finalUrl, pagesFetched: fetched };
+  return { html: parts.join('\n'), finalUrl: homePage.finalUrl, pagesFetched: fetched };
 }

@@ -18,6 +18,8 @@
 
 import { enrichPlaces, type CrawlOutcome } from '../../../packages/engine/src/enrich/enrich.ts';
 import { domainOf } from '../../../packages/engine/src/enrich/emails.ts';
+import { loadProxies } from '../../../packages/engine/src/search/proxy-config.ts';
+import type { ProxyPool } from '../../../packages/engine/src/search/proxy.ts';
 import { PlaceDatabase } from '../../../packages/engine/src/store/database.ts';
 import type { EnrichedPlace } from '../../../packages/engine/src/schema.ts';
 import { DATABASE_PATH, listExtractions } from './extraction.ts';
@@ -37,21 +39,25 @@ const BATCH = 300;
 const IDLE_POLL_MS = 60_000;
 const PAUSE_POLL_MS = 3_000;
 
-// Concurrency — crawls run direct from the home IP, NOT through the proxy pool.
-// The proxies would parallelise across hundreds of exit IPs, but undici's
-// ProxyAgent throws an *uncaught* exception in its own connection-cleanup when a
-// site fails through it (agent.js closeClientIfUnused reads .origin of an
-// undefined dispatcher). Email crawling hits dead sites constantly, so that
-// crash is guaranteed — it would take down the whole app. The Google Maps
-// extraction gets away with proxies only because it talks to Google, which
-// rarely connection-errors. So we scale the home IP instead: benchmarked, the
-// home connection saturates around here (~480 sites/min), and throughput was
-// flat from 16 to 64 while the hit rate held at 50% — the old value of 4 was
-// far too timid and made a 200k backlog a 27-hour wait.
-const CONCURRENCY_IDLE = 40;
-// While an extraction shares the uplink, stay a notch lower so its proxy
-// traffic isn't starved — still ~6x the old throttle.
-const CONCURRENCY_BUSY = 24;
+// Concurrency. Crawling through the proxy pool spreads the work across hundreds
+// of exit IPs, so we can run far wider than one home IP allows — benchmarked at
+// ~750 sites/min at concurrency 300 vs ~480 direct. (This needs undici >= 8.8.0:
+// 8.7 threw an *uncaught* exception in ProxyAgent's connection-cleanup whenever a
+// site failed through it, which email crawling — hitting dead sites constantly —
+// triggered nonstop and crashed the whole app. 8.8 fixed that cleanup.)
+//
+// Two things bound how wide we can safely go, and both are handled adaptively:
+//   1. Proxy count — more IPs, more parallelism. The cap scales with pool size.
+//   2. The home connection — ALL proxy traffic still flows through it, so a weak
+//      or flaky connection chokes. Rising timeouts are the signal; when they
+//      climb we back off, when they're low we grow back (see the loop).
+const CONCURRENCY_MIN = 12;
+const CONCURRENCY_STEP = 24;
+/** Cap when crawling through proxies: wide, but not beyond what one uplink feeds. */
+const proxiedCap = (poolSize: number): number => Math.min(300, Math.max(40, poolSize));
+/** Without proxies we're on the home IP alone — modest, and yield to extractions. */
+const DIRECT_CAP_IDLE = 40;
+const DIRECT_CAP_BUSY = 24;
 
 /** Session memory of domains whose crawls keep failing; see the skip logic below. */
 const domainFails = new Map<string, number>();
@@ -90,6 +96,23 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
   const publish = () => onUpdate(state);
   // One long-lived handle; WAL lets extraction writes interleave freely.
   const db = new PlaceDatabase(DATABASE_PATH);
+
+  // The proxy fleet unlocks the real throughput. Email crawling doesn't need
+  // Google's per-IP pacing (it hits arbitrary sites), so a plain round-robin
+  // ProxyPool — not the extraction's paced EgressPool — is right. Loaded once;
+  // proxies rarely change, and a change is a restart anyway.
+  let proxies: ProxyPool | null = null;
+  try {
+    proxies = (await loadProxies()).pool;
+  } catch {
+    // No proxies configured — crawl direct from the home IP.
+  }
+
+  // Adaptive concurrency, carried across batches. Starts moderate and climbs
+  // while the connection is healthy; when timeouts rise (a weak or busy uplink)
+  // it backs off, so a bad-internet spell throttles itself instead of piling on
+  // requests that all time out. The cap depends on proxy count.
+  let concurrency = proxies ? Math.min(80, proxiedCap(proxies.size)) : DIRECT_CAP_IDLE;
 
   for (;;) {
     try {
@@ -139,15 +162,19 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
       const checkedBefore = state.checked;
       const foundBefore = state.found;
 
-      // Wider while idle; a touch narrower while an extraction shares the uplink.
+      // Cap depends on whether we have proxies, and (direct only) whether an
+      // extraction is sharing the home uplink. The adaptive `concurrency` climbs
+      // toward this cap when healthy and is clamped to it here.
       const extracting = listExtractions().some((x) => x.status === 'running' || x.status === 'starting');
-      const concurrency = extracting ? CONCURRENCY_BUSY : CONCURRENCY_IDLE;
+      const cap = proxies ? proxiedCap(proxies.size) : extracting ? DIRECT_CAP_BUSY : DIRECT_CAP_IDLE;
+      concurrency = Math.min(concurrency, cap);
       const outcomes: CrawlOutcome[] = [];
       const enriched = await enrichPlaces(
         places,
         {
+          proxies,
           concurrency,
-          perSiteTimeoutMs: extracting ? 18_000 : 15_000,
+          perSiteTimeoutMs: 15_000,
           outcomes,
         },
         (p) => {
@@ -158,19 +185,32 @@ async function loop(onUpdate: (state: EnrichmentState) => void): Promise<void> {
       );
 
       db.upsertMany(enriched);
-      // Reached sites are settled — an email was there or it wasn't. Unreachable
-      // ones defer and retry with backoff; a timeout is not "no email".
-      const reachedIds = work.filter((_, i) => outcomes[i] !== 'unreachable').map((p) => p.id);
-      const unreachableIds = work.filter((_, i) => outcomes[i] === 'unreachable').map((p) => p.id);
+      // Reached sites are settled — an email was there or it wasn't. A dead site
+      // (unreachable) or a slow one (timeout) defers and retries with backoff;
+      // neither is "no email".
+      const reachedIds = work.filter((_, i) => outcomes[i] === 'ok' || outcomes[i] === 'no_site').map((p) => p.id);
+      const deferIds = work.filter((_, i) => outcomes[i] === 'unreachable' || outcomes[i] === 'timeout').map((p) => p.id);
       db.markEmailChecked(reachedIds);
-      db.markEmailDeferred([...unreachableIds, ...skippedIds]);
+      db.markEmailDeferred([...deferIds, ...skippedIds]);
 
-      // Update the per-domain failure memory from what actually happened.
+      // Per-domain failure memory: only a genuine dead-site failure counts. A
+      // timeout is our connection, not the domain's fault — don't blacklist a
+      // whole chain because the uplink hiccuped.
       for (let i = 0; i < work.length; i++) {
         const domain = domainOf(work[i]!.row.site);
         if (!domain) continue;
         if (outcomes[i] === 'unreachable') domainFails.set(domain, (domainFails.get(domain) ?? 0) + 1);
-        else domainFails.delete(domain);
+        else if (outcomes[i] === 'ok') domainFails.delete(domain);
+      }
+
+      // Adapt for the next batch from this one's timeout rate — the live
+      // read on whether the connection can take more.
+      const timeouts = outcomes.filter((o) => o === 'timeout').length;
+      const timeoutRate = work.length ? timeouts / work.length : 0;
+      if (timeoutRate > 0.25) {
+        concurrency = Math.max(CONCURRENCY_MIN, Math.floor(concurrency * 0.6));
+      } else if (timeoutRate < 0.08 && concurrency < cap) {
+        concurrency = Math.min(cap, concurrency + CONCURRENCY_STEP);
       }
 
       state.checked = checkedBefore + ids.length;
