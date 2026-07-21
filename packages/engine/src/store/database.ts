@@ -432,11 +432,11 @@ export class PlaceDatabase {
       return { mode: 'points', points };
     }
 
-    // Otherwise bin into a grid. ~64 cells across the viewport reads as clusters
-    // without clumping; the divisor is derived from the visible span, not zoom,
-    // so it is correct regardless of projection quirks.
+    // Otherwise bin into a fine grid — ~110 cells across the viewport. Fine
+    // enough that the client's heat map blends into a smooth density gradient
+    // rather than blocky patches, while still only a few hundred rows on the wire.
     const spanLng = Math.max(1e-6, bounds.e - bounds.w);
-    const grid = spanLng / 64;
+    const grid = spanLng / 110;
     const clusters = this.#db
       .prepare(`SELECT COUNT(*) AS count, AVG(latitude) AS lat, AVG(longitude) AS lng
                 FROM places ${where} ${box}

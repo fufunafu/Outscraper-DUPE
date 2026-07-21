@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
-<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js" defer></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" defer></script>
 <style>
   :root {
     --bg:#eef2fb; --card:#fff; --ink:#1a2233; --muted:#6b7688; --line:#dfe4ee;
@@ -944,7 +944,7 @@ function buildQuery() {
 }
 
 /* ---- Table & map views of query results ---- */
-let map = null, mapLayer = null;
+let map = null, mapLayer = null, heatLayer = null;
 
 /* Table state: server-side sort + pagination. */
 let qSort = 'reviews', qDir = 'desc', qOffset = 0;
@@ -1132,20 +1132,24 @@ async function refreshMapData(fitToData) {
     setTimeout(() => refreshMapData(fitToData), 4000);
     return;
   }
+  // Reset both renderings; each refresh shows exactly one (heat OR pins).
   mapLayer.clearLayers();
+  if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
 
   if (data.mode === 'clusters') {
-    for (const c of data.clusters) {
-      const r = Math.round(13 + Math.min(24, Math.log10(c.count + 1) * 11));
-      const label = c.count >= 1000 ? (c.count / 1000).toFixed(c.count >= 10000 ? 0 : 1) + 'k' : String(c.count);
-      const icon = L.divIcon({ className: 'mapcluster', iconSize: [r * 2, r * 2],
-        html: `<div style="width:${r*2}px;height:${r*2}px;line-height:${r*2-4}px">${label}</div>` });
-      const m = L.marker([c.lat, c.lng], { icon });
-      // Clicking a bubble zooms in, which re-aggregates it into finer bubbles/points.
-      m.on('click', () => map.setView([c.lat, c.lng], Math.min(19, map.getZoom() + 3)));
-      m.addTo(mapLayer);
+    // Zoomed out / dense: a heat map. Each grid-cell centroid is one weighted
+    // point; log-scaling the count keeps mid-density areas visible next to a few
+    // huge metros instead of everything but LA reading as cold.
+    const maxCount = Math.max(1, ...data.clusters.map((c) => c.count));
+    const maxW = Math.log10(maxCount + 1);
+    const pts = data.clusters.map((c) => [c.lat, c.lng, Math.log10(c.count + 1)]);
+    if (window.L.heatLayer) {
+      heatLayer = L.heatLayer(pts, {
+        radius: 28, blur: 22, max: maxW, minOpacity: 0.35,
+        gradient: { 0.2: '#3b6fe0', 0.45: '#22a06b', 0.65: '#e0a53b', 0.85: '#e0563b', 1.0: '#c0392b' },
+      }).addTo(map);
     }
-    $('mapHint').textContent = `${data.total.toLocaleString()} places in view · click a bubble or zoom in for individual businesses`;
+    $('mapHint').textContent = `${data.total.toLocaleString()} places · hotter = denser · zoom in for individual businesses`;
   } else {
     for (const p of data.points) {
       const colour = catColor(p.category);
@@ -1158,7 +1162,7 @@ async function refreshMapData(fitToData) {
         ${p.site ? `<br><a href="${esc(p.site)}" target="_blank" rel="noopener">website</a>` : ''}`);
       m.addTo(mapLayer);
     }
-    $('mapHint').textContent = `${data.points.length.toLocaleString()} businesses shown`;
+    $('mapHint').textContent = `${data.points.length.toLocaleString()} businesses shown — click a pin for details`;
   }
 
   if (fitToData) {

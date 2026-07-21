@@ -14,6 +14,19 @@ import { ensureProxyTemplate, loadProxies } from '../../../packages/engine/src/s
 
 const PREFERRED_PORT = 4317;
 
+// This process runs unattended for days, opening and closing thousands of
+// website connections. A stray async error deep in a dependency — notably
+// undici's `TypeError: ...reading 'origin'` racing on a socket close — would
+// otherwise take the whole app down (losing the live UI and interrupting a
+// scrape) over something entirely cosmetic. Log and carry on: durable progress
+// is checkpointed in the database, and staying up beats a clean crash here.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', (err as Error)?.stack ?? err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
 function openBrowser(url: string): void {
   const command =
     process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start ""' : 'xdg-open';
