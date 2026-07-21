@@ -378,7 +378,7 @@ export class PlaceDatabase {
    * pin. Kept to a handful of columns so tens of thousands of points travel to
    * the browser without dragging every 54-field record along.
    */
-  geo(filter: PlaceQuery = {}, limit = 30_000): GeoPoint[] {
+  geo(filter: PlaceQuery = {}, limit = 200_000): GeoPoint[] {
     const { clause, params } = this.#where(filter);
     const and = clause ? `${clause} AND` : 'WHERE';
     const rows = this.#db

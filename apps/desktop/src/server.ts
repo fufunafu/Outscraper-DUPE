@@ -254,10 +254,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const filter = (await readBody(req)) as PlaceQuery;
     const db = openDatabase();
     try {
-      const limit = 30_000;
+      // Clustering keeps this many pins smooth; enough to show the whole
+      // database today with headroom, capped so a runaway payload can't hang
+      // the browser once it grows past a few hundred thousand.
+      const limit = 200_000;
       const points = db.geo(filter, limit);
       const total = db.countWhere(filter);
-      return json(res, 200, { points, total, truncated: total > points.length });
+      // Truncated only when the cap was actually hit — not merely because some
+      // matching rows lack coordinates (those can't be plotted regardless).
+      return json(res, 200, { points, total, truncated: points.length >= limit });
     } finally {
       db.close();
     }
