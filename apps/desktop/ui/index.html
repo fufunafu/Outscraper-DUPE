@@ -369,6 +369,7 @@
         <button class="primary" id="healthCheckBtn">Test all proxies</button>
         <span class="meta" id="healthCheckMeta" style="align-self:center"></span>
       </div>
+      <div id="webshareBox" style="border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:18px"></div>
       <div id="healthPools"></div>
       <div id="healthResults"></div>
       <div style="border-top:1px solid var(--line);margin-top:18px;padding-top:16px">
@@ -765,7 +766,7 @@ function switchTab(which, syncHash = true) {
     // The map may have been created while its tab was hidden; re-measure.
     if (map) setTimeout(() => map.invalidateSize(), 60);
   }
-  if (which === 'health') refreshHealth();
+  if (which === 'health') { refreshHealth(); refreshWebshare(); }
 }
 window.addEventListener('hashchange', () => switchTab(location.hash.slice(1), false));
 
@@ -1663,6 +1664,106 @@ $('healthCheckBtn').onclick = async () => {
   healthCheck = await (await fetch('/api/health/check', {method:'POST'})).json();
   renderHealthCheck();
 };
+
+/* ---- Webshare: pull & refresh proxies straight from the provider ---- */
+let webshareState = null;   // { connected, plan }
+let wsBusy = false;         // false | true | 'sync' | 'replace'
+let wsReplaceArmed = false; // two-step guard on the refresh (it costs a refresh)
+
+async function refreshWebshare() {
+  try { webshareState = await (await fetch('/api/proxies/webshare')).json(); }
+  catch { webshareState = webshareState ?? { connected: false }; }
+  renderWebshare();
+}
+
+function wsPlanLine(plan) {
+  if (!plan) return '';
+  const bits = [];
+  if (plan.onDemandAvailable != null)
+    bits.push(`<b>${plan.onDemandAvailable}</b>${plan.onDemandTotal != null ? ` of ${plan.onDemandTotal}` : ''} on-demand refreshes left this month`);
+  if (plan.autoRefreshNextAt) {
+    const d = new Date(plan.autoRefreshNextAt);
+    if (!isNaN(d)) bits.push(`next free auto-refresh ${d.toLocaleDateString()}`);
+  }
+  return bits.length ? `<div class="meta" style="margin-top:6px">${bits.join(' · ')}</div>` : '';
+}
+
+function renderWebshare(msg) {
+  const box = $('webshareBox');
+  const s = webshareState;
+  const note = msg ? `<div class="meta" style="margin-top:10px;color:${msg.err ? 'var(--err)' : 'var(--ok)'}">${esc(msg.text)}</div>` : '';
+  if (!s || !s.connected) {
+    box.innerHTML = `
+      <div style="font-weight:600;font-size:13px;margin-bottom:2px">Connect Webshare</div>
+      <p class="hint" style="margin:0 0 10px">Pull your proxy list straight from Webshare — no more downloading a file. Paste your API token from <a href="https://dashboard.webshare.io/userapi/keys" target="_blank" rel="noopener">Webshare → API → Keys</a>. It's stored only on this Mac.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input type="password" id="wsToken" placeholder="Webshare API token" style="flex:1;min-width:220px" autocomplete="off" spellcheck="false">
+        <button class="primary" id="wsConnect" ${wsBusy ? 'disabled' : ''}>${wsBusy ? 'Connecting…' : 'Connect & pull'}</button>
+      </div>${note}`;
+    $('wsConnect').onclick = wsConnect;
+    $('wsToken').onkeydown = (e) => { if (e.key === 'Enter') wsConnect(); };
+    return;
+  }
+  box.innerHTML = `
+    <div class="head" style="align-items:center">
+      <div><b style="font-size:13px">Webshare connected</b>${wsPlanLine(s.plan)}</div>
+      <button class="ghost" id="wsDisconnect" ${wsBusy ? 'disabled' : ''}>Disconnect</button>
+    </div>
+    <div class="actions" style="margin:12px 0 0">
+      <button class="primary" id="wsSync" ${wsBusy ? 'disabled' : ''}>${wsBusy === 'sync' ? 'Syncing…' : 'Sync list'}</button>
+      <button class="ghost" id="wsReplace" ${wsBusy ? 'disabled' : ''}
+        style="${wsReplaceArmed ? 'border-color:var(--warn);color:var(--warn)' : ''}">${wsBusy === 'replace' ? 'Getting fresh IPs…' : wsReplaceArmed ? 'Confirm — uses 1 refresh' : 'Get fresh IPs'}</button>
+    </div>
+    <p class="hint" style="margin-top:8px"><b>Sync list</b> re-pulls your current IPs (free, anytime). <b>Get fresh IPs</b> replaces the whole set with new ones and uses one monthly on-demand refresh. Either one takes effect on the next region/pass — a run in progress keeps the proxies it started with.</p>${note}`;
+  $('wsDisconnect').onclick = wsDisconnect;
+  $('wsSync').onclick = () => wsAction('sync', 'Syncing proxy list…');
+  $('wsReplace').onclick = () => {
+    if (!wsReplaceArmed) {
+      wsReplaceArmed = true; renderWebshare();
+      setTimeout(() => { if (wsReplaceArmed) { wsReplaceArmed = false; renderWebshare(); } }, 4000);
+      return;
+    }
+    wsReplaceArmed = false;
+    wsAction('replace', 'Requesting fresh IPs…');
+  };
+}
+
+async function wsConnect() {
+  const token = ($('wsToken')?.value ?? '').trim();
+  if (!token) { renderWebshare({ err: true, text: 'Paste your API token first.' }); return; }
+  wsBusy = true; renderWebshare({ text: 'Connecting to Webshare…' });
+  try {
+    const r = await (await fetch('/api/proxies/webshare/connect', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
+    })).json();
+    wsBusy = false;
+    if (r.error) { webshareState = { connected: false }; renderWebshare({ err: true, text: r.error }); return; }
+    webshareState = { connected: true, plan: r.plan };
+    renderWebshare({ text: `Connected — pulled ${(r.count ?? 0).toLocaleString()} proxies into the app.` });
+    refreshHealth();
+  } catch { wsBusy = false; renderWebshare({ err: true, text: 'Could not reach the app server.' }); }
+}
+
+async function wsAction(kind, pending) {
+  wsBusy = kind; renderWebshare({ text: pending });
+  try {
+    const r = await (await fetch(`/api/proxies/webshare/${kind}`, { method: 'POST' })).json();
+    wsBusy = false;
+    if (r.error) { renderWebshare({ err: true, text: r.error }); return; }
+    if (r.plan && webshareState) webshareState.plan = r.plan;
+    renderWebshare({ text: kind === 'replace'
+      ? `Fresh IPs pulled — ${(r.count ?? 0).toLocaleString()} proxies. Applies on the next pass.`
+      : `Synced — ${(r.count ?? 0).toLocaleString()} proxies.` });
+    refreshHealth();
+  } catch { wsBusy = false; renderWebshare({ err: true, text: 'Could not reach the app server.' }); }
+}
+
+async function wsDisconnect() {
+  wsBusy = true; renderWebshare();
+  try { await fetch('/api/proxies/webshare/disconnect', { method: 'POST' }); } catch { /* ignore */ }
+  wsBusy = false; webshareState = { connected: false };
+  renderWebshare({ text: 'Disconnected. Your proxies file is unchanged.' });
+}
 
 // Live pool numbers move constantly during a run; refresh while watching.
 setInterval(() => { if (currentTab === 'health') refreshHealth(); }, 3000);

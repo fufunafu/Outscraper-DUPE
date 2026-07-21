@@ -67,6 +67,20 @@ export async function ensureProxyTemplate(): Promise<void> {
   }
 }
 
+/**
+ * Overwrite the proxy file with a fresh set — e.g. pulled straight from the
+ * Webshare API. Any hand edits are replaced, which is the intent: the provider
+ * is now the source of truth. The dir is created if the app has never run.
+ */
+export async function saveProxies(urls: string[], note = 'Synced from Webshare'): Promise<void> {
+  await mkdir(CONFIG_DIR, { recursive: true });
+  const header =
+    `# Places Scraper — proxy list\n` +
+    `# ${note} on ${new Date().toISOString()}\n` +
+    `# ${urls.length} proxies. This file is overwritten on the next sync.\n\n`;
+  await writeFile(PROXY_FILE, header + urls.join('\n') + (urls.length ? '\n' : ''), 'utf8');
+}
+
 export interface ProxyLoadResult {
   pool: ProxyPool | null;
   /** How many proxy URLs were loaded, for surfacing in the UI. */

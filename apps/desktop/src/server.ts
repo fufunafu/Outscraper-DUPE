@@ -18,7 +18,8 @@ import { cancelJob, getJob, listJobs, startJob, OUTPUT_DIR, type Job } from './j
 import { filterConflicts } from './filters.ts';
 import { geocode, areaSquareKm } from '../../../packages/engine/src/geo/geocode.ts';
 import { searchCategories } from '../../../packages/engine/src/categories.ts';
-import { loadProxies, PROXY_FILE } from '../../../packages/engine/src/search/proxy-config.ts';
+import { loadProxies, saveProxies, PROXY_FILE } from '../../../packages/engine/src/search/proxy-config.ts';
+import { fetchWebshareProxies, refreshWebshareList, websharePlan } from '../../../packages/engine/src/search/webshare.ts';
 import { COUNTRIES, citySearch, toQuery, type LocationSelection } from '../../../packages/engine/src/locations.ts';
 import { verticalNames, verticalTerms } from '../../../packages/engine/src/verticals.ts';
 import {
@@ -337,6 +338,83 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (req.method === 'POST' && url.pathname === '/api/health/check') {
     return json(res, 202, startProxyCheck(broadcastHealth));
+  }
+
+  // --- Webshare: pull & refresh proxies straight from the provider ---
+  // The token is stored locally (settings table), like the proxies file itself.
+  // Reads go directly to Webshare over the machine's own connection, so a worn
+  // pool can always be refreshed. A sync/refresh takes effect on the next pass,
+  // since a running extraction holds the pool it started with.
+  const readToken = (): string | null => {
+    const db = openDatabase();
+    try {
+      return db.getSetting('webshareToken');
+    } finally {
+      db.close();
+    }
+  };
+
+  if (req.method === 'GET' && url.pathname === '/api/proxies/webshare') {
+    const token = readToken();
+    if (!token) return json(res, 200, { connected: false });
+    return json(res, 200, { connected: true, plan: await websharePlan(token) });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/proxies/webshare/connect') {
+    const { token } = (await readBody(req)) as { token?: string };
+    const trimmed = token?.trim();
+    if (!trimmed) return json(res, 400, { error: 'Paste your Webshare API token.' });
+    try {
+      // The list call doubles as token validation — a bad token 401s here.
+      const proxies = await fetchWebshareProxies(trimmed);
+      await saveProxies(proxies);
+      const db = openDatabase();
+      try {
+        db.setSetting('webshareToken', trimmed);
+      } finally {
+        db.close();
+      }
+      return json(res, 200, { connected: true, count: proxies.length, plan: await websharePlan(trimmed) });
+    } catch (error) {
+      return json(res, 400, { error: (error as Error).message });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/proxies/webshare/sync') {
+    const token = readToken();
+    if (!token) return json(res, 400, { error: 'Connect Webshare first.' });
+    try {
+      const proxies = await fetchWebshareProxies(token);
+      await saveProxies(proxies);
+      return json(res, 200, { count: proxies.length, plan: await websharePlan(token) });
+    } catch (error) {
+      return json(res, 400, { error: (error as Error).message });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/proxies/webshare/replace') {
+    const token = readToken();
+    if (!token) return json(res, 400, { error: 'Connect Webshare first.' });
+    try {
+      await refreshWebshareList(token);
+      // Webshare provisions the fresh IPs asynchronously; give it a moment.
+      await new Promise((r) => setTimeout(r, 4_000));
+      const proxies = await fetchWebshareProxies(token);
+      await saveProxies(proxies);
+      return json(res, 200, { count: proxies.length, refreshed: true, plan: await websharePlan(token) });
+    } catch (error) {
+      return json(res, 400, { error: (error as Error).message });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/proxies/webshare/disconnect') {
+    const db = openDatabase();
+    try {
+      db.deleteSetting('webshareToken');
+    } finally {
+      db.close();
+    }
+    return json(res, 200, { connected: false });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/database/query') {
