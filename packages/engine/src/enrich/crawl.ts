@@ -35,6 +35,31 @@ export interface CrawlResult {
   error?: string;
 }
 
+/**
+ * Read a response body up to `cap` decompressed bytes, then stop pulling. undici
+ * decompresses lazily as the stream is read, so halting early means the tail is
+ * never expanded — bounding memory no matter how large the payload inflates to.
+ */
+async function readCapped(res: Awaited<ReturnType<typeof undiciFetch>>, cap: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const decoder = new TextDecoder('utf-8');
+  let out = '';
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+      out += decoder.decode(value, { stream: true });
+      if (bytes >= cap) { await reader.cancel(); break; }
+    }
+  } catch {
+    // A mid-stream error still leaves us whatever decoded so far — good enough.
+  }
+  return out;
+}
+
 async function fetchPage(url: string, options: CrawlOptions): Promise<{ html: string; finalUrl: string } | null> {
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 12_000);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
@@ -57,8 +82,13 @@ async function fetchPage(url: string, options: CrawlOptions): Promise<{ html: st
       await res.body?.cancel();
       return null;
     }
-    // Cap the body: a contact page is small, and some sites stream megabytes.
-    const html = (await res.text()).slice(0, 1_500_000);
+    // Cap the body WHILE reading, not after. `res.text()` fully decompresses
+    // first, so a small brotli/gzip payload that expands to gigabytes (a
+    // decompression bomb, or just a pathological page) blows the heap before any
+    // post-hoc .slice() runs — which crashed the app under concurrent crawling.
+    // Reading the stream and stopping at the cap means the rest is never
+    // decompressed at all.
+    const html = await readCapped(res, 1_500_000);
     return { html, finalUrl: res.url };
   } catch {
     return null;

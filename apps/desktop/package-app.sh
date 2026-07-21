@@ -78,7 +78,10 @@ PORT=4317
 URL="http://127.0.0.1:$PORT"
 
 if ! /usr/bin/curl -s -m 1 "$URL/" >/dev/null 2>&1; then
+  # Roomy heap: a whole-database map query plus concurrent site crawling can
+  # spike allocations; the default limit is what an OOM crash landed on.
   /usr/bin/nohup "$RES/node" --experimental-strip-types --no-warnings \
+    --max-old-space-size=4096 \
     "$RES/app/apps/desktop/src/main.ts" \
     >> "$HOME/Library/Logs/PlacesScraper.log" 2>&1 &
   for _ in $(seq 1 60); do
