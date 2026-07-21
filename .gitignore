@@ -5,3 +5,7 @@ node_modules/
 out/
 .env*
 .DS_Store
+
+# The packaged Mac app is a build artifact — 112MB with its own bundled Node.
+# Rebuilt any time with `bash apps/desktop/package-app.sh .`; never committed.
+*.app/
