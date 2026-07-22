@@ -62,7 +62,10 @@ export function findRegion(country: string, code: string): Region | undefined {
 export function toQuery(selection: LocationSelection): string {
   const country = COUNTRIES[selection.country];
   const region = findRegion(selection.country, selection.region);
-  const parts = [selection.city, region?.code ?? selection.region, country?.name ?? selection.country];
+  // Use the region's FULL NAME, not its 2-letter code: a code like "LA" geocodes
+  // to Los Angeles, not Louisiana, dropping the search box on the wrong side of
+  // the country. Full names ("Louisiana, United States") are unambiguous.
+  const parts = [selection.city, region?.name ?? region?.code ?? selection.region, country?.name ?? selection.country];
   return parts.filter(Boolean).join(', ');
 }
 
