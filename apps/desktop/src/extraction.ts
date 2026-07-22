@@ -40,6 +40,15 @@ export const DATABASE_PATH = join(OUTPUT_DIR, 'places.db');
  * it, from freezing on one bad unit. Abandoned units retry next cycle.
  */
 const UNIT_STALL_MS = 3 * 60_000;
+/** How often the per-unit guard checks for a stall or runaway. */
+const GUARD_INTERVAL_MS = 15_000;
+/**
+ * A single unit (one term × one 12 km box) that searches more cells than this
+ * has run away — its quadtree kept subdividing far past any real density (one
+ * Boston box hit ~490k). Cut it loose: whatever it has found is already saved,
+ * and a later pass revisits it. A generous ceiling, so only true runaways trip.
+ */
+const MAX_CELLS_PER_UNIT = 12_000;
 
 export interface ExtractionRequest {
   vertical: string;
@@ -178,6 +187,17 @@ async function run(
         ? seedBoxes(region.cities.map((c) => ({ name: c.n, lat: c.lat, lng: c.lng, population: c.p })), geo.box)
         : [{ box: geo.box, seeds: [location.region] }];
 
+    // Zero boxes means the seeding cities all fell outside the geocoded box —
+    // almost always a bad geocode (e.g. an ambiguous name resolving to the wrong
+    // place). Fail loudly and retry rather than silently completing an empty
+    // region, which would falsely mark it "done" with no data.
+    if (boxes.length === 0) {
+      throw new Error(
+        `No search areas for ${location.region}: its cities fall outside the geocoded box ` +
+          `("${toQuery(location)}" may have geocoded to the wrong location).`,
+      );
+    }
+
     const regionKey = `${location.country}/${location.region}`;
     // Resume an interrupted pass, or start the next one — each pass accumulates
     // the ~40–50% of businesses the previous passes' samples missed.
@@ -234,31 +254,51 @@ async function run(
         }
         extraction.progress.currentTerm = unit.term;
 
-        // Stall watchdog: abandon this unit only if it goes quiet — no new cell
-        // searched — for UNIT_STALL_MS. A slow-but-advancing metro box keeps
-        // running; a hung one (a request that never returns) is cut loose so it
-        // can't freeze the region and the campaign behind it. The timer resets
-        // on every progress tick.
+        // Per-unit guard. A unit is cut loose if it either goes quiet (no new
+        // cell for UNIT_STALL_MS — a hung request) or runs away (more than
+        // MAX_CELLS_PER_UNIT cells — a subdivision gone haywire). Crucially the
+        // guard REJECTS the race below, so the worker stops waiting even when the
+        // stuck request ignores the abort signal. The old watchdog only *aborted*
+        // the signal and then kept awaiting the scrape — so a request that didn't
+        // observe the abort froze the whole region and the campaign behind it.
         const unitAbort = new AbortController();
         const onMainAbort = () => unitAbort.abort();
         controller.signal.addEventListener('abort', onMainAbort, { once: true });
-        let watchdog = setTimeout(() => unitAbort.abort(), UNIT_STALL_MS);
+
+        let lastProgress = Date.now();
+        let cellsThisUnit = 0;
+        let guardTimer: ReturnType<typeof setInterval> | undefined;
+        const guard = new Promise<never>((_, reject) => {
+          guardTimer = setInterval(() => {
+            let reason = '';
+            if (Date.now() - lastProgress > UNIT_STALL_MS) reason = 'stalled (no new cells for 3m)';
+            else if (cellsThisUnit > MAX_CELLS_PER_UNIT) reason = `runaway (${cellsThisUnit} cells)`;
+            if (reason) {
+              unitAbort.abort(); // best-effort: stop the underlying requests too
+              reject(new Error(`unit ${reason}`));
+            }
+          }, GUARD_INTERVAL_MS);
+        });
 
         let placeCount = 0;
         try {
-          const result = await scrape({
-            query: unit.term,
-            region: boxes[unit.boxIndex]!.box,
-            language: extraction.request.language ?? 'en',
-            concurrency: perScrapeConcurrency,
-            egress,
-            signal: unitAbort.signal,
-          }, (p) => {
-            extraction.progress.cellsSearched = cellsTotal + p.cellsSearched;
-            // Progress: the unit is alive, so restart its stall clock.
-            clearTimeout(watchdog);
-            watchdog = setTimeout(() => unitAbort.abort(), UNIT_STALL_MS);
-          });
+          // Race the scrape against the guard: whichever settles first wins. A
+          // guard rejection can't be ignored, so a unit can never hang forever.
+          const result = await Promise.race([
+            scrape({
+              query: unit.term,
+              region: boxes[unit.boxIndex]!.box,
+              language: extraction.request.language ?? 'en',
+              concurrency: perScrapeConcurrency,
+              egress,
+              signal: unitAbort.signal,
+            }, (p) => {
+              cellsThisUnit = p.cellsSearched;
+              extraction.progress.cellsSearched = cellsTotal + p.cellsSearched;
+              lastProgress = Date.now();
+            }),
+            guard,
+          ]);
           cellsTotal = extraction.progress.cellsSearched;
 
           // Persist this box's places; count only genuinely new ones.
@@ -267,13 +307,13 @@ async function run(
           extraction.progress.placesInDb = db.count;
           placeCount = result.places.length;
         } catch (error) {
-          // A whole-run cancellation propagates and ends the worker. A stalled
-          // unit does not — skip just this one and keep the region moving.
+          // A whole-run cancellation propagates and ends the worker. A stalled or
+          // runaway unit does not — skip just this one and keep the region moving.
           if (controller.signal.aborted) throw error;
           extraction.progress.unitsTimedOut += 1;
           cellsTotal = extraction.progress.cellsSearched;
         } finally {
-          clearTimeout(watchdog);
+          clearInterval(guardTimer);
           controller.signal.removeEventListener('abort', onMainAbort);
         }
 
